@@ -1,0 +1,64 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+goplatform
+gpctl
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+
+# Secrets
+*.pem
+*.key
+secrets.yaml
+secrets/
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/

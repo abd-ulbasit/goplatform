@@ -1,0 +1,143 @@
+# GoPlatform Configuration Example
+# Copy to config.yaml and customize
+
+# Controller settings
+controller:
+  # Metrics server bind address
+  metricsBindAddress: ":8080"
+  
+  # Health probe bind address
+  healthProbeBindAddress: ":8081"
+  
+  # Leader election for high availability
+  leaderElection:
+    enabled: true
+    resourceName: goplatform-leader-election
+    resourceNamespace: goplatform-system
+  
+  # Worker counts per controller
+  workers:
+    application: 5
+    database: 3
+    cache: 3
+
+# Terraform settings
+terraform:
+  # Path to terraform binary
+  binaryPath: "/usr/local/bin/terraform"
+  
+  # Working directory for terraform operations
+  workDir: "/tmp/goplatform-terraform"
+  
+  # State backend configuration
+  stateBackend:
+    type: s3  # s3 or local
+    bucket: "goplatform-terraform-state"
+    region: "us-east-1"
+    dynamoDBTable: "goplatform-terraform-locks"
+    encrypt: true
+  
+  # Execution settings
+  parallelism: 10
+  timeout: 30m
+
+# AWS settings
+aws:
+  region: "us-east-1"
+  
+  # VPC for provisioned resources
+  vpcId: "vpc-xxxxxxxx"
+  subnetIds:
+    - "subnet-xxxxxxxx"
+    - "subnet-yyyyyyyy"
+  
+  # Tags applied to all resources
+  defaultTags:
+    Environment: "production"
+    ManagedBy: "goplatform"
+
+# Platform API settings
+api:
+  enabled: true
+  bindAddress: ":8082"
+  
+  # Authentication
+  auth:
+    type: "jwt"  # jwt or apikey
+    jwtIssuer: "https://auth.example.com"
+    jwtAudience: "goplatform"
+
+# Observability settings
+observability:
+  # Prometheus ServiceMonitor generation
+  prometheus:
+    enabled: true
+    namespace: "monitoring"
+  
+  # Grafana dashboard generation
+  grafana:
+    enabled: true
+    namespace: "monitoring"
+  
+  # OpenTelemetry tracing
+  tracing:
+    enabled: true
+    endpoint: "http://otel-collector:4317"
+    sampleRate: 0.1
+
+# Service catalog settings
+catalog:
+  enabled: true
+  
+  # Automatic dependency detection
+  dependencyDetection:
+    enabled: true
+  
+  # Compliance checking
+  compliance:
+    enabled: true
+    policies:
+      - "resource-limits-required"
+      - "security-context-required"
+
+# Logging
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json or text
+  development: false
+
+# Default values for Applications
+defaults:
+  application:
+    replicas: 2
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  
+  database:
+    postgres:
+      small:
+        instanceClass: "db.t3.micro"
+        storage: 20
+      medium:
+        instanceClass: "db.t3.small"
+        storage: 50
+      large:
+        instanceClass: "db.t3.medium"
+        storage: 100
+  
+  cache:
+    redis:
+      small:
+        nodeType: "cache.t3.micro"
+        numNodes: 1
+      medium:
+        nodeType: "cache.t3.small"
+        numNodes: 2
+      large:
+        nodeType: "cache.t3.medium"
+        numNodes: 3
