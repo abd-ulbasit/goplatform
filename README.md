@@ -9,45 +9,128 @@ Build a production-grade Internal Developer Platform that transforms declarative
 ## The Problem
 
 Platform teams spend endless hours on:
-1. **Ticket-based provisioning** - "Please create my database" (3-day SLA)
-2. **Snowflake infrastructure** - Every service configured differently
-3. **Knowledge silos** - Only platform team knows how to deploy
-4. **Compliance gaps** - Manual security reviews, inconsistent policies
-5. **Cost opacity** - No idea what each team spends
+- **Ticket-based provisioning** - "Please create my database" (3-day SLA)
+- **Snowflake infrastructure** - Every service configured differently
+- **Knowledge silos** - Only platform team knows how to deploy
+- **Compliance gaps** - Manual security reviews, inconsistent policies
+- **Cost opacity** - No idea what each team spends
 
 ## The Solution
 
-GoPlatform lets developers declare what they need, and the platform provisions everything automatically:
+Developers declare what they need. The platform provisions everything automatically:
 
 ```yaml
-# Developer applies this YAML
 apiVersion: platform.goplatform.io/v1alpha1
 kind: Application
 metadata:
   name: payments-api
-  namespace: default
 spec:
   team: payments
-  language: go
-
-  # What the developer needs
+  tier: critical
+  
+  workload:
+    image: ghcr.io/org/payments-api:v1.0.0
+    replicas: 3
+  
+  # Cloud-agnostic infrastructure requests
   database:
     type: postgres
     size: small
+    highAvailability: true
+  
   cache:
     type: redis
+    size: small
+  
   queue:
     type: sqs
+    deadLetterQueue:
+      enabled: true
 
 # GoPlatform automatically provisions:
-# ✅ Kubernetes Deployment, Service, HPA
+# ✅ Kubernetes Deployment, Service, HPA, PDB
 # ✅ AWS RDS PostgreSQL (via Terraform)
 # ✅ AWS ElastiCache Redis (via Terraform)
-# ✅ AWS SQS Queue (via Terraform)
-# ✅ IAM roles with least-privilege
+# ✅ AWS SQS Queue with DLQ (via Terraform)
+# ✅ IAM roles with least-privilege (IRSA)
 # ✅ Prometheus ServiceMonitor
-# ✅ Grafana dashboard
-# ✅ Service catalog entry
+# ✅ Grafana dashboard (auto-generated)
+# ✅ Alerting rules based on SLA tier
+# ✅ Service catalog entry with dependencies
+```
+
+---
+
+## What Makes GoPlatform Different
+
+| Feature | GoPlatform | Backstage | Crossplane | Terraform Cloud |
+|---------|:----------:|:---------:|:----------:|:---------------:|
+| **K8s Native (CRDs)** | ✅ | ❌ | ✅ | ❌ |
+| **Self-Hosted** | ✅ | ✅ | ✅ | ❌ |
+| **K8s + Cloud Resources** | ✅ | ❌ | ✅ | ❌ |
+| **Use Existing TF Modules** | ✅ | ❌ | ❌ | ✅ |
+| **Service Catalog Built-in** | ✅ | ✅ | ❌ | ❌ |
+| **Cost Estimation** | ✅ | ❌ | ❌ | ❌ |
+| **Preview Environments** | ✅ | ❌ | ❌ | ❌ |
+| **Drift Detection** | ✅ | ❌ | ✅ | ✅ |
+| **Complexity** | Medium | High | High | Low |
+
+### Unique Capabilities
+
+#### 🔮 Cost Estimation Before Provisioning
+```bash
+$ gpctl estimate payments-api.yaml
+
+Estimated Monthly Cost: $73.95
+├── RDS db.t3.small (PostgreSQL):  $49.64
+├── RDS storage (100GB gp2):       $11.50
+├── ElastiCache cache.t3.micro:    $12.41
+└── SQS (~1M messages):            $0.40
+
+Proceed with provisioning? [y/N]
+```
+
+#### 🚀 Preview Environments for Every PR
+Open a PR → Get a fully isolated environment with its own database, cache, and URL.
+```
+🚀 Preview environment ready!
+URL: https://pr-42.payments-api.preview.example.com
+Logs: https://grafana.example.com/d/preview-pr-42
+```
+
+#### 🔄 Environment Promotion
+```bash
+$ gpctl promote payments-api --from dev --to staging
+
+Diff:
+  replicas: 1 → 2
+  database.size: small → medium
+
+Promote to staging? [y/N]
+```
+
+#### 🔍 Drift Detection & Self-Healing
+Detects when cloud resources drift from desired state:
+```yaml
+status:
+  conditions:
+    - type: DriftDetected
+      status: "True"
+      message: "aws_db_instance.main instance_class drifted: db.t3.small → db.t3.medium"
+```
+
+#### 💰 Team Budgets & Cost Controls
+```yaml
+apiVersion: platform.goplatform.io/v1alpha1
+kind: TeamQuota
+metadata:
+  name: payments-team
+spec:
+  maxApplications: 10
+  maxMonthlyBudget: 5000  # USD
+  alerts:
+    - threshold: 80
+      notify: slack
 ```
 
 ---
@@ -55,422 +138,102 @@ spec:
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                              GoPlatform                                          │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │                        Developer Experience Layer                           │ │
-│  │                                                                             │ │
-│  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────────┐  │ │
-│  │  │ kubectl     │   │ gpctl CLI   │   │ REST API    │   │ GitOps          │  │ │
-│  │  │ apply -f    │   │ apply/status│   │ /api/v1/    │   │ (ArgoCD sync)   │  │ │
-│  │  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └────────┬────────┘  │ │
-│  │         │                 │                 │                    │          │ │
-│  └─────────┼─────────────────┼─────────────────┼────────────────────┼──────────┘ │
-│            │                 │                 │                    │            │
-│            ▼                 ▼                 ▼                    ▼            │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │                         Kubernetes API Server                               │ │
-│  │                                                                             │ │
-│  │  Application CRD    Database CRD    Cache CRD    Queue CRD                 │ │
-│  │  (desired state stored in etcd)                                            │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                        │                                         │
-│                                        │ watch                                   │
-│                                        ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │                    GoPlatform Controller (Operator)                         │ │
-│  │                                                                             │ │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │ │
-│  │  │ App Reconciler  │  │ DB Reconciler   │  │ Observability Reconciler    │  │ │
-│  │  │                 │  │                 │  │                             │  │ │
-│  │  │ - Watch App CRD │  │ - Watch DB CRD  │  │ - Generate ServiceMonitor   │  │ │
-│  │  │ - Create K8s    │  │ - Call Terraform│  │ - Generate Grafana dash     │  │ │
-│  │  │   resources     │  │ - Manage state  │  │ - Create AlertRules         │  │ │
-│  │  │ - Update status │  │ - Handle errors │  │ - Configure tracing         │  │ │
-│  │  └────────┬────────┘  └────────┬────────┘  └─────────────┬───────────────┘  │ │
-│  │           │                    │                         │                  │ │
-│  │           │              ┌─────┴─────┐                   │                  │ │
-│  │           │              ▼           ▼                   │                  │ │
-│  │           │     ┌────────────┐  ┌────────────┐           │                  │ │
-│  │           │     │ TF Runner  │  │ TF State   │           │                  │ │
-│  │           │     │            │  │ Manager    │           │                  │ │
-│  │           │     │ - Generate │  │            │           │                  │ │
-│  │           │     │   modules  │  │ - S3 state │           │                  │ │
-│  │           │     │ - Apply    │  │ - DDB lock │           │                  │ │
-│  │           │     │ - Destroy  │  │ - Isolate  │           │                  │ │
-│  │           │     └────────────┘  └────────────┘           │                  │ │
-│  │           │                                              │                  │ │
-│  └───────────┼──────────────────────────────────────────────┼──────────────────┘ │
-│              │                                              │                    │
-│              ▼                                              ▼                    │
-│  ┌─────────────────────────────────┐  ┌─────────────────────────────────────────┐│
-│  │     Kubernetes Resources        │  │         Observability Stack             ││
-│  │                                 │  │                                         ││
-│  │  ┌───────────┐  ┌───────────┐   │  │  ┌─────────────┐  ┌─────────────────┐   ││
-│  │  │Deployment │  │  Service  │   │  │  │ Prometheus  │  │ Grafana         │   ││
-│  │  │+ replicas │  │+ ClusterIP│   │  │  │ scrapes     │  │ dashboards      │   ││
-│  │  └───────────┘  └───────────┘   │  │  │ metrics     │  │ auto-generated  │   ││
-│  │  ┌───────────┐  ┌───────────┐   │  │  └─────────────┘  └─────────────────┘   ││
-│  │  │    HPA    │  │    PDB    │   │  │  ┌─────────────┐  ┌─────────────────┐   ││
-│  │  │autoscale  │  │disruption │   │  │  │ AlertRules  │  │ ServiceMonitor  │   ││
-│  │  │           │  │ budget    │   │  │  │ SLA-based   │  │ per-app config  │   ││
-│  │  └───────────┘  └───────────┘   │  │  └─────────────┘  └─────────────────┘   ││
-│  │  ┌───────────┐  ┌───────────┐   │  │                                         ││
-│  │  │ConfigMap  │  │  Secret   │   │  └─────────────────────────────────────────┘│
-│  │  │app config │  │credentials│   │                                             │
-│  │  └───────────┘  └───────────┘   │                                             │
-│  └─────────────────────────────────┘                                             │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │                         AWS Infrastructure                                  │ │
-│  │                         (Provisioned via Terraform)                         │ │
-│  │                                                                             │ │
-│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │ │
-│  │  │   RDS     │  │ElastiCache│  │    SQS    │  │    S3     │  │    IAM    │  │ │
-│  │  │ PostgreSQL│  │   Redis   │  │  Queues   │  │  Buckets  │  │   Roles   │  │ │
-│  │  │ + replicas│  │ + cluster │  │ + DLQ     │  │ + policy  │  │ + IRSA    │  │ │
-│  │  └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘  │ │
-│  │                                                                             │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │                         Service Catalog                                     │ │
-│  │                                                                             │ │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │ │
-│  │  │ Dependency Graph│  │ Team Ownership  │  │ Compliance Status           │  │ │
-│  │  │ A → B → C       │  │ payments: [app] │  │ ✓ resource limits          │  │ │
-│  │  │                 │  │ orders: [app2]  │  │ ✓ security policies         │  │ │
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │ │
-│  │                                                                             │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Developer Interface                            │
+│   kubectl apply  │  gpctl CLI  │  REST API  │  GitOps (ArgoCD)              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Kubernetes API Server                               │
+│   Application CRD  │  ProviderConfig CRD  │  TeamQuota CRD                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │ watch
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        GoPlatform Controller                                │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │ App Reconciler  │  │ Infra Provider  │  │ Observability Controller   │  │
+│  │ - K8s resources │  │ - AWS (TF)      │  │ - ServiceMonitor           │  │
+│  │ - Status mgmt   │  │ - GCP (future)  │  │ - Grafana Dashboard        │  │
+│  │ - Conditions    │  │ - Local (dev)   │  │ - PrometheusRule           │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+          │                      │                         │
+          ▼                      ▼                         ▼
+┌─────────────────┐   ┌─────────────────────┐   ┌─────────────────────────────┐
+│ K8s Resources   │   │ Cloud Infrastructure│   │ Observability Stack         │
+│ - Deployment    │   │ - RDS PostgreSQL   │   │ - Prometheus scraping      │
+│ - Service       │   │ - ElastiCache Redis│   │ - Grafana dashboards       │
+│ - HPA, PDB      │   │ - SQS Queues       │   │ - Alert rules              │
+│ - ConfigMap     │   │ - S3 Buckets       │   │                             │
+│ - Secret        │   │ - IAM Roles (IRSA) │   │                             │
+└─────────────────┘   └─────────────────────┘   └─────────────────────────────┘
 ```
 
 ---
 
-## Component Breakdown
+## Cloud-Agnostic Design
 
-### 1. Kubernetes Operator (Core)
-
-The heart of GoPlatform - a controller that watches CRDs and reconciles desired state.
+The Application CRD is cloud-agnostic. The platform maps abstract specs to provider-specific resources:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Controller Runtime                           │
-│                                                                 │
-│  ┌───────────────┐     ┌───────────────┐     ┌───────────────┐  │
-│  │  Informer     │────►│  Work Queue   │────►│  Reconciler   │  │
-│  │  (watch CRDs) │     │  (rate limit) │     │  (reconcile)  │  │
-│  └───────────────┘     └───────────────┘     └───────────────┘  │
-│                                                     │           │
-│                                              ┌──────┴──────┐    │
-│                                              ▼             ▼    │
-│                                       ┌───────────┐ ┌──────────┐│
-│                                       │Create K8s │ │Call      ││
-│                                       │Resources  │ │Terraform ││
-│                                       └───────────┘ └──────────┘│
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 2. Terraform Integration
-
-Programmatic Terraform for AWS resource provisioning.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Terraform Runner                             │
-│                                                                 │
-│  ┌───────────────┐     ┌───────────────┐     ┌───────────────┐  │
-│  │ Module Gen    │────►│ TF Init/Plan  │────►│ TF Apply      │  │
-│  │ (Go → HCL)    │     │ (validate)    │     │ (provision)   │  │
-│  └───────────────┘     └───────────────┘     └───────────────┘  │
-│         │                                           │           │
-│         ▼                                           ▼           │
-│  ┌───────────────┐                          ┌───────────────┐   │
-│  │ Per-App State │                          │ Output Parser │   │
-│  │ s3://bucket/  │                          │ (endpoints,   │   │
-│  │ apps/{ns}/{n} │                          │  credentials) │   │
-│  └───────────────┘                          └───────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 3. Service Catalog
-
-Track all applications, dependencies, and ownership.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Service Catalog                              │
-│                                                                 │
-│  Applications:                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │ payments-api      │ team: payments │ deps: [orders-db]    │ │
-│  │ orders-service    │ team: orders   │ deps: [payments-api] │ │
-│  │ notification-svc  │ team: platform │ deps: [sqs-queue]    │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│  Dependency Graph:                                              │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │     orders-service                                         │ │
-│  │           │                                                │ │
-│  │           ▼                                                │ │
-│  │     payments-api ─────► orders-db (RDS)                    │ │
-│  │           │                                                │ │
-│  │           ▼                                                │ │
-│  │     notification-svc ─────► sqs-queue                      │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        Application Spec (Cloud-Agnostic)                   │
+│                                                                            │
+│    database:               cache:                 queue:                   │
+│      type: postgres          type: redis            type: sqs              │
+│      size: small             size: small            fifo: false            │
+│      highAvailability: true                                                │
+└────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+              ┌──────────────────────┼──────────────────────┐
+              ▼                      ▼                      ▼
+┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
+│    AWS Provider     │  │    GCP Provider     │  │   Local Provider    │
+│                     │  │     (future)        │  │                     │
+│  postgres+small →   │  │  postgres+small →   │  │  postgres+small →   │
+│  RDS db.t3.micro    │  │  Cloud SQL db-f1    │  │  CloudNativePG      │
+│                     │  │                     │  │                     │
+│  redis+small →      │  │  redis+small →      │  │  redis+small →      │
+│  ElastiCache        │  │  Memorystore Redis  │  │  Redis Operator     │
+│  cache.t3.micro     │  │                     │  │                     │
+└─────────────────────┘  └─────────────────────┘  └─────────────────────┘
 ```
 
 ---
 
-## Development Phases
+## Quick Start
 
-### Phase 1: Operator Foundation
-**Goal:** Build core Kubernetes operator with basic CRD and K8s resource generation.
+### Prerequisites
+- Kubernetes 1.33+ cluster (Colima, kind, or EKS)
+- kubectl configured
+- AWS credentials (for cloud resources)
 
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M1 | Project Setup & CRD Design | kubebuilder scaffolding, Application CRD schema, validation webhooks |
-| M2 | Basic Controller Reconciliation | Watch Applications, create Deployments, handle create/update/delete |
-| M3 | Kubernetes Resource Generation | Service, ConfigMap, HPA, PDB generation from Application spec |
-| M4 | Status Management & Conditions | Status subresource, conditions (Ready, Progressing, Degraded) |
-| M5 | Finalizers & Cleanup | Safe deletion with finalizers, cascading cleanup |
-
-### Phase 2: Terraform Integration
-**Goal:** Provision AWS infrastructure via Terraform from within the operator.
-
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M6 | Terraform Runner Basics | Call Terraform CLI from Go, init/plan/apply workflow |
-| M7 | State Management | Per-app state isolation, S3 backend, DynamoDB locking |
-| M8 | RDS Module | Generate RDS Terraform module, provision PostgreSQL |
-| M9 | ElastiCache Module | Generate ElastiCache module, provision Redis |
-| M10 | SQS Module | Generate SQS module with DLQ configuration |
-| M11 | IAM & IRSA | Generate IAM roles, service account annotations |
-
-### Phase 3: Platform API & CLI
-**Goal:** REST API and CLI tool for platform interaction beyond kubectl.
-
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M12 | Platform API Server | REST API for app listing, status, provisioning |
-| M13 | CLI Tool (gpctl) | gpctl apply, status, logs, delete commands |
-| M14 | Authentication | API keys, JWT tokens, RBAC integration |
-| M15 | Webhook Events | Notify external systems on app lifecycle events |
-
-### Phase 4: Observability
-**Goal:** Auto-generate monitoring, alerting, and dashboards for every application.
-
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M16 | ServiceMonitor Generation | Prometheus scrape configs per app |
-| M17 | Grafana Dashboard Generation | Auto-generated dashboards based on app type |
-| M18 | AlertRule Generation | SLA-based alerts (latency, error rate, availability) |
-| M19 | Distributed Tracing | OpenTelemetry configuration injection |
-
-### Phase 5: Service Catalog
-**Goal:** Track all applications, dependencies, and provide a software catalog.
-
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M20 | Catalog CRD & Controller | ServiceCatalog CRD, track all apps |
-| M21 | Dependency Tracking | Infer and store dependencies between services |
-| M22 | Team Ownership | Track team ownership, enable team-based views |
-| M23 | Compliance Checks | Validate apps meet platform policies |
-
-### Phase 6: Advanced Features
-**Goal:** Production hardening and advanced platform capabilities.
-
-| Milestone | Description | Key Deliverables |
-|-----------|-------------|------------------|
-| M24 | Multi-Environment | Dev/staging/prod environment support |
-| M25 | GitOps Integration | ArgoCD ApplicationSet integration |
-| M26 | Cost Tracking | Tag AWS resources, aggregate costs per team |
-| M27 | Secrets Management | Integration with AWS Secrets Manager or external-secrets |
-| M28 | Production Hardening | Rate limiting, audit logging, metrics |
-
----
-
-## Milestone Details
-
-### Milestone 1: Project Setup & CRD Design
-
-**Goal:** Set up the operator project structure and design the core Application CRD.
-
-**Learning Focus:**
-- How kubebuilder scaffolds operators
-- CRD schema design with OpenAPI validation
-- Why structural schemas matter for Kubernetes
-- Admission webhooks for complex validation
-
-**Deliverables:**
-- [ ] kubebuilder project initialization
-- [ ] Application CRD with comprehensive spec
-- [ ] Validation webhook for Application
-- [ ] Default values webhook
-- [ ] CRD installation via Helm/Kustomize
-- [ ] Basic unit tests for CRD
-
-**CRD Design:**
-```yaml
-apiVersion: platform.goplatform.io/v1alpha1
-kind: Application
-metadata:
-  name: my-app
-spec:
-  # Team ownership
-  team: payments
-  
-  # Workload configuration
-  replicas: 3
-  image: ghcr.io/org/my-app:v1.0.0
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 1
-      memory: 1Gi
-  
-  # Infrastructure dependencies
-  database:
-    type: postgres
-    version: "15"
-    size: small  # small/medium/large → maps to RDS instance types
-    backup:
-      enabled: true
-      retentionDays: 7
-  
-  cache:
-    type: redis
-    size: small
-  
-  queue:
-    type: sqs
-    fifo: false
-  
-  # Observability
-  observability:
-    metrics:
-      enabled: true
-      port: 9090
-      path: /metrics
-    tracing:
-      enabled: true
-      sampleRate: 0.1
-
-status:
-  phase: Ready  # Pending/Provisioning/Ready/Failed
-  conditions:
-    - type: KubernetesReady
-      status: "True"
-    - type: DatabaseReady
-      status: "True"
-    - type: CacheReady
-      status: "True"
-  database:
-    endpoint: my-app-db.xxx.us-east-1.rds.amazonaws.com
-    port: 5432
-  cache:
-    endpoint: my-app-cache.xxx.cache.amazonaws.com
-    port: 6379
-```
-
----
-
-### Milestone 2: Basic Controller Reconciliation
-
-**Goal:** Implement the core reconciliation loop that watches Applications and creates Kubernetes resources.
-
-**Learning Focus:**
-- Controller-runtime architecture (informers, work queues)
-- Reconciliation pattern (level-triggered)
-- Idempotent operations
-- Error handling and requeueing
-
-**Deliverables:**
-- [ ] ApplicationReconciler implementation
-- [ ] Create Deployment from Application spec
-- [ ] Handle create/update/delete events
-- [ ] Proper logging and error handling
-- [ ] Requeue on transient failures
-- [ ] Unit tests with envtest
-
-**Key Concepts:**
-```
-Reconciliation Flow:
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ User applies │────►│ Informer     │────►│ Work Queue   │
-│ Application  │     │ sees change  │     │ (rate        │
-│              │     │              │     │  limited)    │
-└──────────────┘     └──────────────┘     └──────┬───────┘
-                                                  │
-                                                  ▼
-                     ┌──────────────┐     ┌──────────────┐
-                     │ Update       │◄────│ Reconcile()  │
-                     │ status       │     │ - Get App    │
-                     └──────────────┘     │ - Compare    │
-                                          │ - Create/Upd │
-                                          └──────────────┘
-```
-
----
-
-### Milestone 6: Terraform Runner Basics
-
-**Goal:** Execute Terraform from within the controller to provision AWS resources.
-
-**Learning Focus:**
-- Calling external processes from Go
-- Terraform CLI workflow (init/plan/apply)
-- Parsing Terraform output
-- Error handling for infrastructure failures
-
-**Deliverables:**
-- [ ] TerraformRunner struct with CLI wrapper
-- [ ] HCL module generation from Go
-- [ ] Init/Plan/Apply workflow
-- [ ] Output parsing (endpoints, credentials)
-- [ ] Destroy for cleanup
-- [ ] Integration tests with localstack
-
-**Key Concepts:**
-```
-Terraform Execution Flow:
-┌───────────────────────────────────────────────────────────────┐
-│                    TerraformRunner                            │
-│                                                               │
-│  1. Generate Module          2. Init           3. Plan        │
-│  ┌─────────────────┐     ┌─────────────┐    ┌─────────────┐   │
-│  │ app.Spec.DB     │────►│ terraform   │───►│ terraform   │   │
-│  │ → main.tf       │     │ init        │    │ plan        │   │
-│  │ → variables.tf  │     │             │    │ -out=plan   │   │
-│  └─────────────────┘     └─────────────┘    └──────┬──────┘   │
-│                                                     │         │
-│  4. Apply                 5. Parse Output           │         │
-│  ┌─────────────────┐     ┌─────────────┐    ┌──────▼──────┐   │
-│  │ terraform       │────►│ Extract     │◄───│ Read        │   │
-│  │ apply plan      │     │ - endpoint  │    │ terraform   │   │
-│  │                 │     │ - port      │    │ output      │   │
-│  └─────────────────┘     │ - creds     │    └─────────────┘   │
-│                          └─────────────┘                      │
-└───────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Quick Start (After Phase 1)
-
+### Installation
 ```bash
-# Install CRDs
-kubectl apply -f deploy/kubernetes/crds/
+# Install CRDs and controller
+helm install goplatform deploy/helm/goplatform -n goplatform-system --create-namespace
 
-# Install operator
-helm install goplatform deploy/helm/goplatform
+# Configure AWS provider
+kubectl apply -f - <<EOF
+apiVersion: platform.goplatform.io/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: aws-default
+spec:
+  provider: aws
+  aws:
+    region: us-east-1
+    terraformStateBackend:
+      bucket: my-platform-tf-state
+      dynamodbTable: my-platform-tf-locks
+EOF
+```
 
+### Deploy an Application
+```bash
 # Create an application
 kubectl apply -f - <<EOF
 apiVersion: platform.goplatform.io/v1alpha1
@@ -478,22 +241,42 @@ kind: Application
 metadata:
   name: demo-app
 spec:
-  team: demo
-  replicas: 2
-  image: nginx:latest
+  team: demo-team
+  tier: standard
+  workload:
+    image: nginx:latest
+    replicas: 2
   database:
     type: postgres
     size: small
 EOF
 
-# Check status
-kubectl get applications
+# Watch provisioning status
+kubectl get applications -w
+
+# Check detailed status
 kubectl describe application demo-app
 
-# Use CLI
+# Or use the CLI
 gpctl status demo-app
-gpctl logs demo-app
 ```
+
+---
+
+## Development Phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **Phase 1** | Operator Foundation (CRDs, Controllers, Status, Finalizers) | 🔜 Not Started |
+| **Phase 2** | Infrastructure Providers (Provider interface, Terraform, RDS, Redis, SQS, IAM) | 📋 Planned |
+| **Phase 3** | Credential Management (Secrets, External Secrets, Rotation) | 📋 Planned |
+| **Phase 4** | Platform API & CLI (REST API, Cost Estimation, gpctl) | 📋 Planned |
+| **Phase 5** | Observability (ServiceMonitor, Dashboards, Alerts, Tracing) | 📋 Planned |
+| **Phase 6** | Service Catalog (Dependencies, Team Ownership, Templates) | 📋 Planned |
+| **Phase 7** | Developer Experience (Env Promotion, Preview Envs, Local Dev, Drift) | 📋 Planned |
+| **Phase 8** | Production Hardening (Policies, Quotas, Audit, HA) | 📋 Planned |
+
+See [PROGRESS.md](PROGRESS.md) for detailed milestone tracking.
 
 ---
 
@@ -501,18 +284,6 @@ gpctl logs demo-app
 
 ```
 goplatform/
-├── .github/
-│   ├── instructions/           # AI instruction files
-│   ├── workflows/              # CI/CD workflows
-│   └── copilot-instructions.md
-├── memory-bank/                # Project memory for AI sessions
-│   ├── projectbrief.md
-│   ├── productContext.md
-│   ├── activeContext.md
-│   ├── systemPatterns.md
-│   ├── techContext.md
-│   ├── progress.md
-│   └── tasks/
 ├── cmd/
 │   ├── goplatform/             # Operator binary
 │   └── gpctl/                  # CLI tool
@@ -521,37 +292,18 @@ goplatform/
 │   ├── api/                    # REST API server
 │   ├── terraform/              # Terraform runner
 │   ├── catalog/                # Service catalog
-│   ├── observability/          # Prometheus/Grafana integration
-│   └── config/                 # Configuration management
+│   └── observability/          # Prometheus/Grafana integration
 ├── pkg/
 │   └── apis/
 │       └── platform/
 │           └── v1alpha1/       # CRD types
 ├── deploy/
-│   ├── helm/
-│   │   └── goplatform/         # Helm chart
+│   ├── helm/goplatform/        # Helm chart
 │   ├── kubernetes/             # Raw K8s manifests
-│   └── terraform/
-│       └── modules/            # Terraform modules for AWS
-├── docs/
-│   └── architecture/           # Architecture docs
-├── PROGRESS.md                 # Development progress
-├── ROADMAP.md                  # Feature roadmap
+│   └── terraform/modules/      # Terraform modules for AWS
+├── PROGRESS.md                 # Milestone tracking
 └── README.md
 ```
-
----
-
-## Comparison with Existing Solutions
-
-| Feature | GoPlatform | Backstage | Crossplane | Terraform Cloud |
-|---------|------------|-----------|------------|-----------------|
-| K8s Native | ✅ CRD-based | ❌ Separate app | ✅ CRD-based | ❌ SaaS |
-| Self-Hosted | ✅ | ✅ | ✅ | ❌ (or TFE) |
-| K8s + Cloud | ✅ Both | ❌ Catalog only | ✅ Both | ❌ Cloud only |
-| Terraform Modules | ✅ Reuse existing | ❌ N/A | ❌ Own providers | ✅ Native |
-| Service Catalog | ✅ Built-in | ✅ Core feature | ❌ No | ❌ No |
-| Complexity | Medium | High | High | Low |
 
 ---
 
@@ -560,9 +312,15 @@ goplatform/
 - **Language:** Go 1.22+
 - **Operator Framework:** controller-runtime, kubebuilder
 - **CLI:** cobra, viper
-- **API:** chi or gin
-- **Infrastructure:** Terraform, AWS SDK
+- **API:** chi (or gin)
+- **Infrastructure:** Terraform, AWS SDK v2
 - **Observability:** Prometheus, Grafana, OpenTelemetry
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ---
 

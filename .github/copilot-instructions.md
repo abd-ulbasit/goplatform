@@ -85,8 +85,8 @@ For EVERY significant piece of code, explain:
 //   │ User deletes │────►│ deletionTS   │────►│ Reconciler   │
 //   │ Application  │     │ set by K8s   │     │ sees delete  │
 //   └──────────────┘     └──────────────┘     └──────┬───────┘
-//                                                     │
-//                        ┌────────────────────────────┘
+//                                                    │
+//                        ┌───────────────────────────┘
 //                        ▼
 //   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 //   │ Remove       │◄────│ TF destroy   │◄────│ Cleanup AWS  │

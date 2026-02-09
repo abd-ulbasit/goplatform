@@ -87,28 +87,68 @@ status:
 
 ## Component Relationships
 
-### Controller → Terraform Runner
-- Controller calls TerraformRunner for AWS resources
-- TerraformRunner returns outputs (endpoints, credentials)
-- Controller stores outputs in status and secrets
+### Controller → InfrastructureProvider
+- Controller calls InfrastructureProvider interface for cloud resources
+- Provider returns endpoints, credentials, and status
+- Controller stores outputs in status and K8s Secrets
+
+### Controller → Terraform Runner (AWS Provider)
+- TerraformRunner executes terraform CLI in subprocess
+- Manages per-application state in S3
+- Uses DynamoDB for locking
 
 ### Controller → Kubernetes Resources
 - Controller creates/updates K8s resources
 - Uses owner references for garbage collection
 - Updates status based on resource state
 
+### Credential Flow
+```
+Terraform provisions RDS → Outputs to TerraformRunner
+    ↓
+TerraformRunner parses outputs → Returns to Controller
+    ↓
+Controller creates K8s Secret (or ExternalSecret for ESO)
+    ↓
+Deployment mounts Secret as environment variables
+    ↓
+Application reads DATABASE_URL from env
+```
+
 ### Service Catalog → Applications
 - Catalog watches all Application CRDs
 - Builds dependency graph
 - Tracks team ownership
 
-## Design Decisions
-
-_To be filled as decisions are made during development_
+## Design Decisions (Session 2)
 
 | Pattern | Decision | Reasoning |
 |---------|----------|-----------|
-| | | |
+| Cloud Abstraction | InfrastructureProvider interface | Simpler than Crossplane XRDs, extensible |
+| Credential Passing | K8s Secrets + ESO support | Simple default, production-ready option |
+| RBAC | K8s RBAC + policies → platform-level later | Don't reinvent, add when needed |
+| Terraform State | S3 + DynamoDB per-app isolation | Standard pattern, proven |
+| Local K8s | Colima with K8s 1.33+ | Good macOS support, avoid extended support costs |
+
+## Infrastructure Provider Pattern
+
+```go
+// Adapter pattern - controller doesn't know which cloud
+type InfrastructureProvider interface {
+    ProvisionDatabase(ctx, app, spec) → (DatabaseStatus, error)
+    ProvisionCache(ctx, app, spec) → (CacheStatus, error)
+    ProvisionQueue(ctx, app, spec) → (QueueStatus, error)
+    Destroy(ctx, app) → error
+    GetStatus(ctx, app) → (InfrastructureStatus, error)
+    EstimateCost(ctx, app) → (CostEstimate, error)
+}
+
+// Implementations
+AWSProvider    → Terraform + RDS/ElastiCache/SQS
+GCPProvider    → Terraform + CloudSQL/Memorystore (future)
+LocalProvider  → CloudNativePG/Redis operators (for dev/preview)
+MockProvider   → For testing
+```
 
 ## Anti-Patterns to Avoid
 
@@ -117,3 +157,5 @@ _To be filled as decisions are made during development_
 3. **Blocking Operations** - Use goroutines for long-running tasks
 4. **Missing Status Updates** - Always report current state
 5. **Orphaned Resources** - Always use finalizers for external resources
+6. **Hardcoded Cloud Logic** - Use provider interface for abstraction
+7. **Secrets in Status** - Use Secret references, not values
