@@ -75,6 +75,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -170,6 +171,13 @@ var _ = Describe("Application Controller", func() {
 			// In tests, we can check recorder.Events channel for emitted events
 			Recorder: record.NewFakeRecorder(100),
 		}
+	}
+
+	// Helper to create reconciler with a custom cleanup hook
+	createReconcilerWithCleanup := func(cleanup func(ctx context.Context, app *platformv1alpha1.Application) error) *ApplicationReconciler {
+		reconciler := createReconciler()
+		reconciler.CleanupExternalResources = cleanup
+		return reconciler
 	}
 
 	// =========================================================================
@@ -706,6 +714,37 @@ var _ = Describe("Application Controller", func() {
 				err := k8sClient.Get(ctx, typeNamespacedName, app)
 				return errors.IsNotFound(err)
 			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should keep finalizer when cleanup fails", func() {
+			By("Deleting the Application")
+			app := &platformv1alpha1.Application{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, app)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+
+			By("Reconciling to set deletion annotation")
+			reconciler := createReconcilerWithCleanup(func(ctx context.Context, app *platformv1alpha1.Application) error {
+				return fmt.Errorf("simulated cleanup failure")
+			})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Reconciling again to trigger cleanup failure")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).To(HaveOccurred())
+
+			By("Verifying finalizer is still present")
+			eventuallyApp := &platformv1alpha1.Application{}
+			Eventually(func() []string {
+				if err := k8sClient.Get(ctx, typeNamespacedName, eventuallyApp); err != nil {
+					return nil
+				}
+				return eventuallyApp.Finalizers
+			}, timeout, interval).Should(ContainElement(applicationFinalizer))
 		})
 	})
 

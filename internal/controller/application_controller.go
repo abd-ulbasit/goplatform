@@ -249,6 +249,24 @@ type ApplicationReconciler struct {
 	//   - Prometheus Operator: Events for config reloads, errors
 	// =========================================================================
 	Recorder record.EventRecorder
+
+	// CleanupExternalResources is an optional hook for deleting external
+	// infrastructure (Terraform, cloud resources, etc.) during finalization.
+	//
+	// WHY THIS EXISTS:
+	//   - M5 requires explicit cleanup on delete, before finalizer removal
+	//   - We don't have real providers yet, so this hook keeps the controller
+	//     production-ready while enabling tests to simulate failure modes
+	//
+	// HOW IT'S USED:
+	//   - If nil: no-op, proceed to finalizer removal
+	//   - If set and returns error: keep finalizer, requeue, emit Warning event
+	//
+	// HOW REAL PLATFORMS DO IT:
+	//   - Crossplane: provider-specific external delete in managed resource
+	//   - AWS ACK: calls AWS Delete APIs and waits for terminal state
+	//
+	CleanupExternalResources func(ctx context.Context, app *platformv1alpha1.Application) error
 }
 
 // =============================================================================
@@ -693,8 +711,19 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *platfor
 	//
 	// =========================================================================
 
-	// TODO(M6): Call InfrastructureProvider.Destroy() here
-	// For now, owned resources are garbage collected automatically
+	// TODO(M6): Replace this hook with InfrastructureProvider.Destroy().
+	// For now, owned resources are garbage collected automatically.
+	if r.CleanupExternalResources != nil {
+		if err := r.CleanupExternalResources(ctx, app); err != nil {
+			logger.Error(err, "external cleanup failed")
+			if r.Recorder != nil {
+				r.Recorder.Event(app, corev1.EventTypeWarning, "CleanupFailed",
+					fmt.Sprintf("External cleanup failed: %v", err))
+			}
+			// Keep finalizer, requeue to retry cleanup
+			return ctrl.Result{RequeueAfter: requeueAfterError}, err
+		}
+	}
 
 	logger.Info("cleanup complete, removing finalizer")
 
