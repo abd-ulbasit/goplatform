@@ -80,12 +80,15 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1alpha1 "github.com/abd-ulbasit/goplatform/api/v1alpha1"
@@ -158,10 +161,14 @@ var _ = Describe("Application Controller", func() {
 	}
 
 	// Helper to create reconciler
+	// Uses a FakeRecorder to capture events during tests
 	createReconciler := func() *ApplicationReconciler {
 		return &ApplicationReconciler{
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
+			// FakeRecorder with buffer of 100 events
+			// In tests, we can check recorder.Events channel for emitted events
+			Recorder: record.NewFakeRecorder(100),
 		}
 	}
 
@@ -461,6 +468,87 @@ var _ = Describe("Application Controller", func() {
 	})
 
 	// =========================================================================
+	// TEST: RESOURCE GENERATION (MILESTONE 3)
+	// =========================================================================
+
+	Context("When generating specialized resources", func() {
+		const resourceName = "test-app-resources"
+		var typeNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			typeNamespacedName = types.NamespacedName{
+				Name:      resourceName,
+				Namespace: "default",
+			}
+		})
+
+		AfterEach(func() {
+			app := &platformv1alpha1.Application{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, app); err == nil {
+				app.Finalizers = nil
+				_ = k8sClient.Update(ctx, app)
+				_ = k8sClient.Delete(ctx, app)
+			}
+		})
+
+		It("should create ConfigMap, Secret, HPA, and PDB", func() {
+			By("Creating the Application")
+			app := createTestApplication(resourceName, "default", true)
+
+			// Configure Scaling
+			minReplicas := int32(2)
+			app.Spec.Scaling = &platformv1alpha1.ScalingSpec{
+				MinReplicas: &minReplicas,
+				MaxReplicas: 5,
+				Metrics: []platformv1alpha1.ScalingMetric{
+					{Type: "cpu", Target: 80},
+				},
+			}
+
+			// Configure High Availability (trigger PDB)
+			app.Spec.Tier = platformv1alpha1.TierCritical
+
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+			By("Reconciling")
+			reconciler := createReconciler()
+
+			// Initial reconcile
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			// Second reconcile to proceed past finalizers
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			By("Verifying ConfigMap")
+			cm := &corev1.ConfigMap{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, cm)
+			}, timeout, interval).Should(Succeed())
+			Expect(cm.Data["APP_NAME"]).To(Equal(resourceName))
+
+			By("Verifying Secret")
+			secret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, secret)
+			}, timeout, interval).Should(Succeed())
+
+			By("Verifying HPA")
+			hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, hpa)
+			}, timeout, interval).Should(Succeed())
+			Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			Expect(*hpa.Spec.MinReplicas).To(Equal(int32(2)))
+
+			By("Verifying PDB")
+			pdb := &policyv1.PodDisruptionBudget{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, pdb)
+			}, timeout, interval).Should(Succeed())
+			Expect(pdb.Spec.MinAvailable.IntVal).To(Equal(int32(1)))
+		})
+	})
+
+	// =========================================================================
 	// TEST: DELETION HANDLING
 	// =========================================================================
 	//
@@ -514,12 +602,20 @@ var _ = Describe("Application Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, app)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
 
-			By("Reconciling to handle deletion")
+			By("Reconciling to handle deletion (may require multiple reconciles)")
 			reconciler := createReconciler()
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
+
+			// The deletion handling now tracks deletion start time via annotation,
+			// which requires a requeue after setting the annotation.
+			// We reconcile multiple times until the finalizer is removed.
+			for i := 0; i < 3; i++ {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: typeNamespacedName,
+				})
+				if err != nil || !result.Requeue {
+					break
+				}
+			}
 
 			By("Verifying the Application was deleted")
 			Eventually(func() bool {

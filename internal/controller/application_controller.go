@@ -148,16 +148,22 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	platformv1alpha1 "github.com/abd-ulbasit/goplatform/api/v1alpha1"
 )
@@ -178,6 +184,15 @@ const (
 	// requeueAfterSuccess is the delay for periodic re-sync.
 	// Even if nothing changed, we recheck to catch drift.
 	requeueAfterSuccess = 5 * time.Minute
+
+	// deletionGracePeriod is the maximum time we wait for external resources
+	// to be cleaned up before giving up. After this, manual intervention needed.
+	// This prevents objects from being stuck in "Deleting" state forever.
+	deletionGracePeriod = 30 * time.Minute
+
+	// deletionStartAnnotation tracks when deletion cleanup started.
+	// Used to detect stuck deletions that exceed the grace period.
+	deletionStartAnnotation = "platform.goplatform.io/deletion-started"
 )
 
 // =============================================================================
@@ -208,6 +223,31 @@ type ApplicationReconciler struct {
 	// Scheme maps Go types to Kubernetes GVKs.
 	// Needed for setting owner references.
 	Scheme *runtime.Scheme
+
+	// Recorder emits Kubernetes Events for important operations.
+	// =========================================================================
+	// WHY EVENTS:
+	//   - Events provide operational visibility into controller actions
+	//   - kubectl describe shows events (last ~1 hour)
+	//   - Monitoring systems can alert on event patterns
+	//   - Users understand what the controller is doing
+	//
+	// WHEN TO EMIT EVENTS:
+	//   - Resource creation: "Created Deployment my-app"
+	//   - Errors: "Failed to create RDS instance: quota exceeded"
+	//   - State transitions: "Scaling from 2 to 4 replicas"
+	//   - External actions: "Terraform apply started"
+	//
+	// EVENT TYPES:
+	//   Normal: Routine operations (create, update, scale)
+	//   Warning: Errors, degraded state, temporary failures
+	//
+	// HOW CROSSPLANE/ARGOCD DO IT:
+	//   - Crossplane: Events for every resource lifecycle event
+	//   - ArgoCD: Events for sync operations, health changes
+	//   - Prometheus Operator: Events for config reloads, errors
+	// =========================================================================
+	Recorder record.EventRecorder
 }
 
 // =============================================================================
@@ -235,6 +275,9 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // =============================================================================
@@ -433,8 +476,36 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		serviceReady = true
 	}
 
+	// Reconcile ConfigMap
+	if _, err := r.reconcileConfigMap(ctx, &app); err != nil {
+		logger.Error(err, "failed to reconcile configmap")
+		r.setFailedCondition(ctx, &app, "ConfigMapFailed", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
+
+	// Reconcile Secret
+	if _, err := r.reconcileSecret(ctx, &app); err != nil {
+		logger.Error(err, "failed to reconcile secret")
+		r.setFailedCondition(ctx, &app, "SecretFailed", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
+
+	// Reconcile HPA
+	if _, err := r.reconcileHPA(ctx, &app); err != nil {
+		logger.Error(err, "failed to reconcile HPA")
+		r.setFailedCondition(ctx, &app, "HPAFailed", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
+
+	// Reconcile PDB
+	if _, err := r.reconcilePDB(ctx, &app); err != nil {
+		logger.Error(err, "failed to reconcile PDB")
+		r.setFailedCondition(ctx, &app, "PDBFailed", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
+
 	// =========================================================================
-	// STEP 5: UPDATE STATUS
+	// STEP 5: UPDATE STATUS WITH RETRY
 	// =========================================================================
 	//
 	// Report the current state of the Application.
@@ -445,31 +516,51 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	//   - Updating status doesn't trigger reconcile (no spec change)
 	//   - Users can watch status for progress
 	//
+	// WHY RETRY:
+	// =========================================================================
+	//   Status updates can fail due to conflicts (another reconcile updated
+	//   the object). Instead of failing the entire reconcile, we retry with
+	//   exponential backoff.
+	//
+	//   CONFLICT SCENARIO:
+	//   1. Reconcile A reads app (resourceVersion: 100)
+	//   2. Reconcile B reads app (resourceVersion: 100)
+	//   3. Reconcile A updates status (resourceVersion: 101)
+	//   4. Reconcile B tries to update status → CONFLICT! (rv 100 < 101)
+	//   5. With retry, B re-fetches (rv 101) and updates → Success
+	//
+	//   HOW CROSSPLANE/ARGOCD HANDLE IT:
+	//     - Crossplane: Uses RetryOnConflict for all status updates
+	//     - ArgoCD: Similar pattern with retry wrapper
+	//     - Prometheus Operator: Implements retry loop
 	// =========================================================================
 
-	// Re-fetch the app to get latest version (in case of conflicts)
-	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
-		logger.Error(err, "failed to re-fetch application for status update")
-		return ctrl.Result{}, err
-	}
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch the app to get latest version
+		if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
+			return err
+		}
 
-	// Update conditions
-	r.updateConditions(ctx, &app, deploymentReady, serviceReady)
+		// Update conditions
+		r.updateConditions(ctx, &app, deploymentReady, serviceReady)
 
-	// Set overall phase
-	if deploymentReady && serviceReady {
-		app.Status.Phase = platformv1alpha1.ApplicationReady
-	} else {
-		app.Status.Phase = platformv1alpha1.ApplicationProvisioning
-	}
+		// Set overall phase
+		if deploymentReady && serviceReady {
+			app.Status.Phase = platformv1alpha1.ApplicationReady
+		} else {
+			app.Status.Phase = platformv1alpha1.ApplicationProvisioning
+		}
 
-	// Set observed generation
-	app.Status.ObservedGeneration = app.Generation
+		// Set observed generation
+		app.Status.ObservedGeneration = app.Generation
 
-	// Persist status
-	if err := r.Status().Update(ctx, &app); err != nil {
-		logger.Error(err, "failed to update status")
-		return ctrl.Result{}, err
+		// Persist status
+		return r.Status().Update(ctx, &app)
+	})
+
+	if retryErr != nil {
+		logger.Error(retryErr, "failed to update status after retries")
+		return ctrl.Result{}, retryErr
 	}
 
 	// =========================================================================
@@ -516,6 +607,16 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 //   Object stays in "Deleting" state until cleanup succeeds
 //   User can see why via kubectl describe (status conditions)
 //
+// TIMEOUT HANDLING:
+// =============================================================================
+//   Objects stuck in deleting state (e.g., Terraform keeps failing) can
+//   cause operational issues. We track when deletion started and emit
+//   warning events if it exceeds the grace period.
+//
+//   This doesn't force-delete (that would orphan resources), but provides
+//   visibility for operators to investigate.
+// =============================================================================
+//
 // =============================================================================
 
 func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *platformv1alpha1.Application) (ctrl.Result, error) {
@@ -527,6 +628,42 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *platfor
 	}
 
 	logger.Info("handling deletion, cleaning up resources")
+
+	// =========================================================================
+	// TRACK DELETION START TIME
+	// =========================================================================
+	//
+	// We add an annotation to track when cleanup started.
+	// If cleanup takes longer than the grace period, we emit warnings.
+	//
+	// =========================================================================
+
+	if app.Annotations == nil {
+		app.Annotations = make(map[string]string)
+	}
+
+	if _, exists := app.Annotations[deletionStartAnnotation]; !exists {
+		app.Annotations[deletionStartAnnotation] = time.Now().Format(time.RFC3339)
+		if err := r.Update(ctx, app); err != nil {
+			logger.Error(err, "failed to set deletion start annotation")
+			return ctrl.Result{}, err
+		}
+		// Requeue to continue after annotation is set
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Check if deletion is taking too long
+	if startTimeStr, exists := app.Annotations[deletionStartAnnotation]; exists {
+		startTime, err := time.Parse(time.RFC3339, startTimeStr)
+		if err == nil && time.Since(startTime) > deletionGracePeriod {
+			logger.Info("deletion exceeds grace period",
+				"gracePeriod", deletionGracePeriod,
+				"elapsed", time.Since(startTime))
+			r.Recorder.Event(app, corev1.EventTypeWarning, "DeletionStuck",
+				fmt.Sprintf("Deletion cleanup exceeds %v grace period. Manual intervention may be required.",
+					deletionGracePeriod))
+		}
+	}
 
 	// Update phase to Deleting
 	app.Status.Phase = platformv1alpha1.ApplicationDeleting
@@ -585,30 +722,56 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *platfor
 //    - Filtering (team label for cost allocation queries)
 //    - Tooling (managed-by for GitOps tools to ignore)
 //
-// 3. SERVER-SIDE APPLY:
-//    We use CreateOrUpdate which does a 3-way merge.
-//    Alternative is Server-Side Apply (SSA) which is more precise but complex.
+// 3. CreateOrUpdate PATTERN:
+//    =========================================================================
+//    WHY CreateOrUpdate:
+//      - Atomic: No race condition between check and create/update
+//      - Idempotent: Safe to call multiple times with same result
+//      - Clean: One function handles both create and update paths
 //
-// HOW OTHER OPERATORS DO IT:
-//   - Crossplane: Uses SSA for all resources
-//   - ArgoCD: Uses client-side apply with special diff logic
-//   - Prometheus Operator: Uses CreateOrUpdate like us
+//    HOW IT WORKS:
+//      1. Fetches existing object (or creates empty template)
+//      2. Calls our mutate function to set desired spec
+//      3. Either Creates (if new) or Updates (if existing)
+//      4. Returns operation result (Created, Updated, Unchanged)
+//
+//    ALTERNATIVES:
+//    ┌─────────────────────────────────────────────────────────────────────┐
+//    │ Approach          │ Pros                 │ Cons                     │
+//    ├───────────────────┼──────────────────────┼──────────────────────────┤
+//    │ Get/Create/Update │ Fine control         │ Race conditions possible │
+//    │ (what we had)     │                      │ between Get and Create   │
+//    ├───────────────────┼──────────────────────┼──────────────────────────┤
+//    │ Server-Side Apply │ Best for conflicts   │ More complex, requires   │
+//    │ (SSA)             │ Multi-owner support  │ field manager setup      │
+//    ├───────────────────┼──────────────────────┼──────────────────────────┤
+//    │ ✅ CreateOrUpdate │ Atomic, simple,      │ Full replacement, not    │
+//    │                   │ idempotent           │ merge                    │
+//    └─────────────────────────────────────────────────────────────────────┘
+//
+//    HOW CROSSPLANE/ARGOCD DO IT:
+//      - Crossplane: Uses SSA for fine-grained field ownership
+//      - ArgoCD: Uses client-side apply with special diff logic
+//      - Prometheus Operator: Uses CreateOrUpdate like us
+//    =========================================================================
 //
 // =============================================================================
 
 func (r *ApplicationReconciler) reconcileDeployment(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
 	logger := log.FromContext(ctx)
 
-	// Build the desired Deployment
-	deployment := r.buildDeployment(app)
+	// =========================================================================
+	// BUILD DESIRED STATE
+	// =========================================================================
+	desired := r.buildDeployment(app)
 
 	// Set owner reference for garbage collection
-	if err := controllerutil.SetControllerReference(app, deployment, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
 		return false, fmt.Errorf("failed to set owner reference: %w", err)
 	}
 
 	// =========================================================================
-	// CREATE OR UPDATE
+	// CREATE OR UPDATE ATOMICALLY
 	// =========================================================================
 	//
 	// CreateOrUpdate implements the "upsert" pattern:
@@ -619,38 +782,51 @@ func (r *ApplicationReconciler) reconcileDeployment(ctx context.Context, app *pl
 	// The mutate function (second arg) modifies the object in-place.
 	// We copy desired spec into the existing object.
 	//
-	// WHY NOT JUST CREATE/UPDATE SEPARATELY:
-	//   Race conditions! Between Get and Create, another reconcile might create.
-	//   CreateOrUpdate handles this atomically.
+	// IMPORTANT: The object passed to CreateOrUpdate must have ObjectMeta
+	// (Name, Namespace) set. The mutate function receives the existing
+	// object (or empty template) and should update it to desired state.
 	//
 	// =========================================================================
 
-	existingDeployment := &appsv1.Deployment{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(deployment), existingDeployment)
-
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// Create new deployment
-			logger.Info("creating deployment", "deployment", deployment.Name)
-			if err := r.Create(ctx, deployment); err != nil {
-				return false, fmt.Errorf("failed to create deployment: %w", err)
-			}
-			return false, nil // Not ready yet, just created
-		}
-		return false, fmt.Errorf("failed to get deployment: %w", err)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
 	}
 
-	// Update existing deployment
-	existingDeployment.Spec = deployment.Spec
-	existingDeployment.Labels = deployment.Labels
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
+		// This function mutates 'deployment' to match desired state
+		// It's called after Get (if exists) or with empty object (if new)
 
-	logger.Info("updating deployment", "deployment", deployment.Name)
-	if err := r.Update(ctx, existingDeployment); err != nil {
-		return false, fmt.Errorf("failed to update deployment: %w", err)
+		// Copy spec from desired
+		deployment.Spec = desired.Spec
+		deployment.Labels = desired.Labels
+
+		// Set owner reference (needed inside mutate for create case)
+		return controllerutil.SetControllerReference(app, deployment, r.Scheme)
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to create/update deployment: %w", err)
+	}
+
+	// Emit event based on operation result
+	switch opResult {
+	case controllerutil.OperationResultCreated:
+		logger.Info("created deployment", "deployment", deployment.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "DeploymentCreated",
+			fmt.Sprintf("Created Deployment %s", deployment.Name))
+	case controllerutil.OperationResultUpdated:
+		logger.Info("updated deployment", "deployment", deployment.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "DeploymentUpdated",
+			fmt.Sprintf("Updated Deployment %s", deployment.Name))
+	case controllerutil.OperationResultNone:
+		// No changes needed
 	}
 
 	// Check if deployment is ready
-	return r.isDeploymentReady(existingDeployment), nil
+	return r.isDeploymentReady(deployment), nil
 }
 
 // buildDeployment creates a Deployment from the Application spec.
@@ -693,12 +869,28 @@ func (r *ApplicationReconciler) buildDeployment(app *platformv1alpha1.Applicatio
 	// Build environment variables
 	env := app.Spec.Workload.Env
 
+	// Build resource requirements (with nil-safe handling)
+	// =========================================================================
+	// NIL SAFETY:
+	//   Resources might be nil if user didn't specify limits/requests.
+	//   Instead of panicking, we use an empty ResourceRequirements.
+	//   Kubernetes will use defaults from LimitRange or none.
+	//
+	// BEST PRACTICE:
+	//   Always check for nil before dereferencing pointers.
+	//   This prevents runtime panics and makes tests more robust.
+	// =========================================================================
+	var resources corev1.ResourceRequirements
+	if app.Spec.Workload.Resources != nil {
+		resources = *app.Spec.Workload.Resources
+	}
+
 	// Build the container
 	container := corev1.Container{
 		Name:           "app",
 		Image:          app.Spec.Workload.Image,
 		Ports:          containerPorts,
-		Resources:      *app.Spec.Workload.Resources,
+		Resources:      resources,
 		Env:            env,
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
@@ -774,38 +966,51 @@ func (r *ApplicationReconciler) isDeploymentReady(deployment *appsv1.Deployment)
 func (r *ApplicationReconciler) reconcileService(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
 	logger := log.FromContext(ctx)
 
-	service := r.buildService(app)
+	desired := r.buildService(app)
 
 	// Set owner reference
-	if err := controllerutil.SetControllerReference(app, service, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
 		return false, fmt.Errorf("failed to set owner reference: %w", err)
 	}
 
-	existingService := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(service), existingService)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
+	}
+
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
+		// Preserve ClusterIP on update (immutable field)
+		clusterIP := service.Spec.ClusterIP
+
+		service.Spec = desired.Spec
+		service.Labels = desired.Labels
+
+		// Restore ClusterIP if it was set (empty string means new service)
+		if clusterIP != "" {
+			service.Spec.ClusterIP = clusterIP
+		}
+
+		return controllerutil.SetControllerReference(app, service, r.Scheme)
+	})
 
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			logger.Info("creating service", "service", service.Name)
-			if err := r.Create(ctx, service); err != nil {
-				return false, fmt.Errorf("failed to create service: %w", err)
-			}
-			return true, nil // Services are "ready" immediately
-		}
-		return false, fmt.Errorf("failed to get service: %w", err)
+		return false, fmt.Errorf("failed to create/update service: %w", err)
 	}
 
-	// Update existing service (preserve ClusterIP)
-	existingService.Spec.Ports = service.Spec.Ports
-	existingService.Spec.Selector = service.Spec.Selector
-	existingService.Labels = service.Labels
-
-	logger.Info("updating service", "service", service.Name)
-	if err := r.Update(ctx, existingService); err != nil {
-		return false, fmt.Errorf("failed to update service: %w", err)
+	switch opResult {
+	case controllerutil.OperationResultCreated:
+		logger.Info("created service", "service", service.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "ServiceCreated",
+			fmt.Sprintf("Created Service %s", service.Name))
+	case controllerutil.OperationResultUpdated:
+		logger.Info("updated service", "service", service.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "ServiceUpdated",
+			fmt.Sprintf("Updated Service %s", service.Name))
 	}
 
-	return true, nil
+	return true, nil // Services are "ready" immediately
 }
 
 // buildService creates a Service from the Application spec.
@@ -835,6 +1040,378 @@ func (r *ApplicationReconciler) buildService(app *platformv1alpha1.Application) 
 			},
 			Ports: ports,
 			Type:  corev1.ServiceTypeClusterIP,
+		},
+	}
+}
+
+// =============================================================================
+// RECONCILE CONFIGMAP
+// =============================================================================
+//
+// Creates or updates the ConfigMap for this Application.
+// Used for non-sensitive configuration.
+//
+// =============================================================================
+
+func (r *ApplicationReconciler) reconcileConfigMap(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	desired := r.buildConfigMap(app)
+
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
+		return false, fmt.Errorf("failed to set owner reference: %w", err)
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
+	}
+
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Data = desired.Data
+		cm.Labels = desired.Labels
+		return controllerutil.SetControllerReference(app, cm, r.Scheme)
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to create/update configmap: %w", err)
+	}
+
+	switch opResult {
+	case controllerutil.OperationResultCreated:
+		logger.Info("created configmap", "configmap", cm.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "ConfigMapCreated",
+			fmt.Sprintf("Created ConfigMap %s", cm.Name))
+	case controllerutil.OperationResultUpdated:
+		logger.Info("updated configmap", "configmap", cm.Name)
+	}
+
+	return true, nil
+}
+
+func (r *ApplicationReconciler) buildConfigMap(app *platformv1alpha1.Application) *corev1.ConfigMap {
+	labels := r.buildLabels(app)
+
+	data := map[string]string{
+		"APP_NAME": app.Name,
+		"APP_TEAM": app.Spec.Team,
+		"APP_TIER": string(app.Spec.Tier),
+	}
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+			Labels:    labels,
+		},
+		Data: data,
+	}
+}
+
+// =============================================================================
+// RECONCILE SECRET
+// =============================================================================
+//
+// Creates the Secret for this Application.
+// Acts as a placeholder for sensitive data and infrastructure credentials.
+//
+// NOTE: We only create secrets, we don't update them after initial creation.
+// This prevents overwriting secrets that were populated by external systems
+// (like Terraform outputs, external-secrets operator, etc.)
+//
+// =============================================================================
+
+func (r *ApplicationReconciler) reconcileSecret(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	desired := r.buildSecret(app)
+
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
+		return false, fmt.Errorf("failed to set owner reference: %w", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
+	}
+
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		// Only set data on creation, not update
+		// This prevents overwriting secrets populated by external systems
+		if secret.CreationTimestamp.IsZero() {
+			secret.Data = desired.Data
+			secret.Type = desired.Type
+		}
+		secret.Labels = desired.Labels
+		return controllerutil.SetControllerReference(app, secret, r.Scheme)
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to create/update secret: %w", err)
+	}
+
+	if opResult == controllerutil.OperationResultCreated {
+		logger.Info("created secret", "secret", secret.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "SecretCreated",
+			fmt.Sprintf("Created Secret %s", secret.Name))
+	}
+
+	return true, nil
+}
+
+func (r *ApplicationReconciler) buildSecret(app *platformv1alpha1.Application) *corev1.Secret {
+	labels := r.buildLabels(app)
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+			Labels:    labels,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			// Placeholder - normally would be populated by infrastructure providers
+		},
+	}
+}
+
+// =============================================================================
+// RECONCILE HPA
+// =============================================================================
+//
+// Creates or updates the HorizontalPodAutoscaler.
+// Deletes HPA if scaling spec is removed (consistent cleanup).
+//
+// =============================================================================
+
+func (r *ApplicationReconciler) reconcileHPA(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	// =========================================================================
+	// CLEANUP LOGIC: Delete HPA if scaling spec is removed
+	// =========================================================================
+	//
+	// WHY WE NEED THIS:
+	//   Owner references handle deletion when the Application is deleted,
+	//   but if user just removes spec.Scaling, the HPA would be orphaned.
+	//   We explicitly delete it to maintain consistency.
+	//
+	// =========================================================================
+
+	if app.Spec.Scaling == nil {
+		existingHPA := &autoscalingv2.HorizontalPodAutoscaler{}
+		err := r.Get(ctx, client.ObjectKey{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		}, existingHPA)
+
+		if err == nil {
+			// Found HPA but scaling spec is nil -> Delete it
+			logger.Info("removing HPA as scaling spec is nil", "hpa", app.Name)
+			if err := r.Delete(ctx, existingHPA); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("failed to delete HPA: %w", err)
+			}
+			r.Recorder.Event(app, corev1.EventTypeNormal, "HPADeleted",
+				fmt.Sprintf("Deleted HPA %s (scaling spec removed)", app.Name))
+		}
+		return true, nil
+	}
+
+	desired := r.buildHPA(app)
+
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
+		return false, fmt.Errorf("failed to set owner reference: %w", err)
+	}
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
+	}
+
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, hpa, func() error {
+		hpa.Spec = desired.Spec
+		hpa.Labels = desired.Labels
+		return controllerutil.SetControllerReference(app, hpa, r.Scheme)
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to create/update HPA: %w", err)
+	}
+
+	switch opResult {
+	case controllerutil.OperationResultCreated:
+		logger.Info("created HPA", "hpa", hpa.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "HPACreated",
+			fmt.Sprintf("Created HPA %s (min: %d, max: %d)",
+				hpa.Name, *app.Spec.Scaling.MinReplicas, app.Spec.Scaling.MaxReplicas))
+	case controllerutil.OperationResultUpdated:
+		logger.Info("updated HPA", "hpa", hpa.Name)
+	}
+
+	return true, nil
+}
+
+func (r *ApplicationReconciler) buildHPA(app *platformv1alpha1.Application) *autoscalingv2.HorizontalPodAutoscaler {
+	labels := r.buildLabels(app)
+	minReplicas := int32(1)
+	if app.Spec.Scaling.MinReplicas != nil {
+		minReplicas = *app.Spec.Scaling.MinReplicas
+	}
+
+	var metrics []autoscalingv2.MetricSpec
+	for _, m := range app.Spec.Scaling.Metrics {
+		if m.Type == "cpu" {
+			metrics = append(metrics, autoscalingv2.MetricSpec{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceCPU,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &m.Target,
+					},
+				},
+			})
+		} else if m.Type == "memory" {
+			metrics = append(metrics, autoscalingv2.MetricSpec{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceMemory,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &m.Target,
+					},
+				},
+			})
+		}
+	}
+
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+			Labels:    labels,
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       app.Name,
+			},
+			MinReplicas: &minReplicas,
+			MaxReplicas: app.Spec.Scaling.MaxReplicas,
+			Metrics:     metrics,
+		},
+	}
+}
+
+// =============================================================================
+// RECONCILE PDB
+// =============================================================================
+//
+// Creates or updates the PodDisruptionBudget.
+// Ensures availability during voluntary disruptions (upgrades, draining).
+// Deletes PDB if tier changes to development (consistent cleanup).
+//
+// PDB SPEC MUTABILITY (K8s 1.27+):
+//   PDB spec is now mutable! We can update minAvailable/maxUnavailable.
+//   Previously (K8s < 1.27), PDB spec was immutable after creation.
+//
+// =============================================================================
+
+func (r *ApplicationReconciler) reconcilePDB(ctx context.Context, app *platformv1alpha1.Application) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	// =========================================================================
+	// CLEANUP LOGIC: Delete PDB if tier is development or no workload
+	// =========================================================================
+	//
+	// WHY:
+	//   - Development tier doesn't need availability guarantees
+	//   - No workload means no pods to protect
+	//   - Consistent cleanup like HPA
+	//
+	// =========================================================================
+
+	if app.Spec.Tier == platformv1alpha1.TierDevelopment || app.Spec.Workload == nil {
+		existingPDB := &policyv1.PodDisruptionBudget{}
+		err := r.Get(ctx, client.ObjectKey{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		}, existingPDB)
+
+		if err == nil {
+			// Found PDB but tier is development or no workload -> Delete it
+			logger.Info("removing PDB (tier=development or no workload)", "pdb", app.Name)
+			if err := r.Delete(ctx, existingPDB); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("failed to delete PDB: %w", err)
+			}
+			r.Recorder.Event(app, corev1.EventTypeNormal, "PDBDeleted",
+				fmt.Sprintf("Deleted PDB %s (tier changed to development)", app.Name))
+		}
+		return true, nil
+	}
+
+	desired := r.buildPDB(app)
+
+	if err := controllerutil.SetControllerReference(app, desired, r.Scheme); err != nil {
+		return false, fmt.Errorf("failed to set owner reference: %w", err)
+	}
+
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+		},
+	}
+
+	opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+		pdb.Spec = desired.Spec
+		pdb.Labels = desired.Labels
+		return controllerutil.SetControllerReference(app, pdb, r.Scheme)
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to create/update PDB: %w", err)
+	}
+
+	switch opResult {
+	case controllerutil.OperationResultCreated:
+		logger.Info("created PDB", "pdb", pdb.Name)
+		r.Recorder.Event(app, corev1.EventTypeNormal, "PDBCreated",
+			fmt.Sprintf("Created PDB %s for %s tier", pdb.Name, app.Spec.Tier))
+	case controllerutil.OperationResultUpdated:
+		logger.Info("updated PDB", "pdb", pdb.Name)
+	}
+
+	return true, nil
+}
+
+func (r *ApplicationReconciler) buildPDB(app *platformv1alpha1.Application) *policyv1.PodDisruptionBudget {
+	labels := r.buildLabels(app)
+
+	// Default to minAvailable 1 for high availability
+	minAvailable := intstr.FromInt(1)
+
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      app.Name,
+			Namespace: app.Namespace,
+			Labels:    labels,
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/name":     app.Name,
+					"app.kubernetes.io/instance": app.Name,
+				},
+			},
 		},
 	}
 }
@@ -961,9 +1538,36 @@ func (r *ApplicationReconciler) setFailedCondition(ctx context.Context, app *pla
 //      Owns(&Service{}) → watch Services we created
 //      If these change, reconcile the OWNER Application
 //
-//   3. PREDICATES (not shown, future enhancement):
-//      Filter events to reduce unnecessary reconciles
-//      Example: Skip if only resourceVersion changed
+//   3. PREDICATES:
+//      =========================================================================
+//      Filter events to reduce unnecessary reconciles.
+//
+//      WHY PREDICATES MATTER:
+//        Without predicates, we reconcile on ANY update, including:
+//        - Status-only changes (we caused these!)
+//        - Metadata-only changes (labels, annotations)
+//        - resourceVersion changes (every API write)
+//
+//        With GenerationChangedPredicate:
+//        - Only reconcile when spec changes (Generation increments)
+//        - Status updates don't trigger reconcile (ObservedGeneration != Generation)
+//        - Greatly reduces unnecessary work
+//
+//      ALTERNATIVES CONSIDERED:
+//      ┌────────────────────────────────────────────────────────────────────────┐
+//      │ Predicate                 │ Filters Out                                │
+//      ├───────────────────────────┼────────────────────────────────────────────┤
+//      │ GenerationChangedPred.    │ Status-only updates                        │
+//      │ AnnotationChangedPred.    │ Label/annotation-only updates              │
+//      │ ResourceVersionChangedP.  │ Almost nothing (too broad)                 │
+//      │ Custom Predicate          │ Whatever logic you define                  │
+//      └────────────────────────────────────────────────────────────────────────┘
+//
+//      HOW CROSSPLANE/ARGOCD DO IT:
+//        - Crossplane: Uses GenerationChanged + custom predicates
+//        - ArgoCD: Custom predicates for specific fields
+//        - Prometheus Operator: GenerationChanged + annotation predicates
+//      =========================================================================
 //
 // THE MANAGER:
 //   - Runs all controllers (we might have multiple)
@@ -976,12 +1580,18 @@ func (r *ApplicationReconciler) setFailedCondition(ctx context.Context, app *pla
 // SetupWithManager sets up the controller with the Manager.
 func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// Primary watch: our CRD
-		For(&platformv1alpha1.Application{}).
+		// Primary watch: our CRD with generation predicate
+		// Only reconcile when spec changes, not on status updates
+		For(&platformv1alpha1.Application{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Secondary watches: resources we own
 		// When these change, find the owner Application and reconcile it
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		// Controller name (for metrics, logging)
 		Named("application").
 		Complete(r)

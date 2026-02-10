@@ -181,6 +181,9 @@ func main() {
 	if err := (&controller.ApplicationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// EventRecorder for emitting Kubernetes Events on resource operations.
+		// Events provide operational visibility via kubectl describe.
+		Recorder: mgr.GetEventRecorderFor("application-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Application")
 		os.Exit(1)

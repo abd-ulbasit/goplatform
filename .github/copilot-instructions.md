@@ -22,6 +22,57 @@ For EVERY significant piece of code, explain:
 5. **REAL-WORLD** - How do Spotify, Netflix, AWS, Google do this?
 6. **FAILURE MODES** - What can go wrong?
 
+## Production Quality Standards
+
+### Nil Safety & Defensive Programming
+- **Always check for nil** before dereferencing pointers
+- Provide sensible defaults when optional fields are nil
+- Document expected nil behavior in comments
+- Add nil guards in all functions that receive pointer arguments
+
+### Error Handling & Resilience
+- **Use retry.RetryOnConflict** for status updates to handle concurrent modifications
+- Emit meaningful error messages with context (wrap errors with `fmt.Errorf("failed to X: %w", err)`)
+- Add timeout handling for long-running operations (especially external calls)
+- Track operation start times to detect stuck processes
+
+### CreateOrUpdate Pattern for Kubernetes Resources
+```go
+// PREFER: Atomic CreateOrUpdate
+opResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
+    obj.Spec = desired.Spec
+    return controllerutil.SetControllerReference(owner, obj, r.Scheme)
+})
+
+// AVOID: Separate Get/Create/Update (race conditions possible)
+if err := r.Get(ctx, key, obj); err != nil { ... }
+```
+
+### Event Recording for Operational Visibility
+- Emit **Normal** events for successful operations (Created, Updated, Deleted)
+- Emit **Warning** events for errors and degraded states
+- Include relevant details in event messages (e.g., "Created HPA (min: 2, max: 10)")
+- Events visible via `kubectl describe` - essential for debugging
+
+### Predicates to Reduce Unnecessary Reconciles
+```go
+For(&Application{},
+    builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+```
+- Only reconcile when spec changes, not status-only updates
+- Reduces API server load and controller CPU usage
+- Consider custom predicates for specific filtering needs
+
+### Consistent Resource Cleanup
+- When a spec field is removed (e.g., `spec.Scaling`), **delete** the associated resource
+- Don't rely only on owner references for spec-change cleanup
+- Log and emit events when cleaning up resources
+
+### Owner References and Garbage Collection
+- Set `controllerutil.SetControllerReference` on all created resources
+- Enables automatic cleanup when parent is deleted
+- Enables watch propagation (child changes → parent reconciled)
+
 ## Learning Mode: Full Agentic Implementation
 
 ### How Sessions Should Flow
@@ -199,6 +250,64 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *v1alpha
 - ✅ DO include ASCII diagrams in comments for complex concepts
 - ✅ DO compare with other platforms in comments
 
+## Testing Best Practices
+
+### Ginkgo/Gomega with Envtest
+This project uses **Ginkgo/Gomega** with **envtest** - the standard for Kubernetes operators:
+- Runs real kube-apiserver and etcd (from test binaries)
+- Catches schema bugs and API behavior issues
+- Controllers are tested step-by-step (deterministic)
+
+### Test Coverage Targets
+- **Controllers**: 70%+ coverage with envtest
+- **Edge cases**: Deletion, updates, error handling
+- **Async assertions**: Use `Eventually()` for reconciliation checks
+
+### Test Patterns
+```go
+// Use Eventually for async operations
+Eventually(func() bool {
+    return k8sClient.Get(ctx, key, obj) == nil
+}, timeout, interval).Should(BeTrue())
+
+// Test cleanup by reconciling multiple times if needed
+for i := 0; i < 3; i++ {
+    result, err := reconciler.Reconcile(ctx, req)
+    if !result.Requeue { break }
+}
+```
+
+### What to Test
+- **Happy path**: Resource creation, updates
+- **Cleanup**: Deletion, finalizer removal, spec field removal
+- **Error handling**: Invalid input, API failures
+- **Status updates**: Conditions, phase transitions
+
+## Code Review Checklist
+
+When reviewing or writing code, verify:
+
+### Safety
+- [ ] Nil checks before pointer dereference
+- [ ] Error wrapping with context
+- [ ] Retry logic for conflict-prone operations
+
+### Kubernetes Patterns
+- [ ] Owner references set on child resources
+- [ ] CreateOrUpdate for atomic operations
+- [ ] Events emitted for important operations
+- [ ] Predicates to reduce reconcile load
+
+### Cleanup
+- [ ] Resources deleted when spec field removed
+- [ ] Finalizer handles external resource cleanup
+- [ ] Graceful handling of stuck deletions
+
+### Observability
+- [ ] Structured logging with context
+- [ ] Events for kubectl describe visibility
+- [ ] Status conditions for progress tracking
+
 ## Tech Stack
 
 **Core:**
@@ -229,3 +338,9 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *v1alpha
 8. **No unnecessary files** - No docs/examples unless requested
 9. **Production quality** - Write code as if shipping to production
 10. **Deep explanations** - I need to understand K8s/TF deeply, not just use them
+11. **Nil safety** - Always check pointers before dereference
+12. **Events** - Emit Kubernetes events for operational visibility
+13. **CreateOrUpdate** - Use atomic patterns, avoid race conditions
+14. **Retry on conflict** - Status updates should handle concurrent modifications
+15. **Predicates** - Filter events to reduce unnecessary reconciles
+16. **Consistent cleanup** - Delete resources when spec fields are removed
