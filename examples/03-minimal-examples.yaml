@@ -1,0 +1,193 @@
+# =============================================================================
+# MINIMAL EXAMPLES FOR QUICK TESTING
+# =============================================================================
+#
+# These are the simplest valid Applications for testing and learning.
+# Start here to verify your GoPlatform installation works.
+#
+# =============================================================================
+
+---
+# =============================================================================
+# EXAMPLE 1: Absolute Minimum
+# =============================================================================
+# Just team, owner, and image. Platform uses all defaults.
+# No database, no cache, no scaling - just a stateless container.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: hello-world
+  namespace: default
+spec:
+  team: demo
+  owner: demo@example.com
+  
+  workload:
+    image: nginx:latest
+
+---
+# =============================================================================
+# EXAMPLE 2: Stateless API with Health Check
+# =============================================================================
+# Simple REST API with proper health checks and metrics.
+# No database - good for BFF (backend-for-frontend) or proxy services.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: simple-api
+  namespace: default
+spec:
+  team: demo
+  owner: demo@example.com
+  tier: development
+
+  workload:
+    image: ghcr.io/example/simple-api:v1.0.0
+    replicas: 2
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+
+  observability:
+    metrics:
+      enabled: true
+    logging:
+      format: json
+
+---
+# =============================================================================
+# EXAMPLE 3: Simple CRUD App with Database
+# =============================================================================
+# Basic web app with PostgreSQL. Good starting point for most services.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: todo-app
+  namespace: default
+spec:
+  team: demo
+  owner: demo@example.com
+  tier: development
+
+  workload:
+    image: ghcr.io/example/todo-app:v1.0.0
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    ports:
+      - name: http
+        containerPort: 8080
+    healthCheck:
+      path: /health
+      port: 8080
+
+  database:
+    type: postgres
+    version: "15"
+    size: small
+    highAvailability: false  # Not needed for dev
+    backup:
+      enabled: true
+      retentionDays: 7
+
+---
+# =============================================================================
+# EXAMPLE 4: Cached Read-Heavy Service
+# =============================================================================
+# Service with Redis cache for read-heavy workloads (product catalog, etc.)
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: product-catalog
+  namespace: default
+spec:
+  team: demo
+  owner: demo@example.com
+  tier: development
+
+  workload:
+    image: ghcr.io/example/product-catalog:v1.0.0
+    replicas: 2
+    ports:
+      - name: http
+        containerPort: 8080
+    healthCheck:
+      path: /health
+      port: 8080
+
+  database:
+    type: postgres
+    version: "15"
+    size: small
+
+  cache:
+    type: redis
+    size: small
+    highAvailability: false
+
+---
+# =============================================================================
+# EXAMPLE 5: Queue Worker (Consumer)
+# =============================================================================
+# Background worker that processes messages from a queue.
+# No HTTP ports - just consumes from SQS.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: email-worker
+  namespace: default
+spec:
+  team: demo
+  owner: demo@example.com
+  tier: development
+
+  workload:
+    image: ghcr.io/example/email-worker:v1.0.0
+    replicas: 2
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    # No HTTP ports - this is a queue consumer
+    ports:
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 9090
+    env:
+      - name: SMTP_HOST
+        value: smtp.example.com
+
+  scaling:
+    minReplicas: 1
+    maxReplicas: 5
+    metrics:
+      - type: cpu
+        target: 70
+
+  queue:
+    type: sqs
+    fifo: false
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 3

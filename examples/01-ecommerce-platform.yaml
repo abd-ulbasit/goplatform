@@ -1,0 +1,439 @@
+# =============================================================================
+# PRODUCTION EXAMPLES: E-COMMERCE MICROSERVICES PLATFORM
+# =============================================================================
+#
+# This demonstrates a realistic e-commerce system with:
+#   - 5 microservices (orders, inventory, payments, notifications, gateway)
+#   - PostgreSQL databases for transactional services
+#   - Redis cache for session/product catalog
+#   - SQS queues for async processing
+#   - S3 for static assets and invoices
+#   - Service dependencies for deployment ordering
+#
+# DEPLOYMENT ORDER (based on dependencies):
+#   1. inventory-api (no dependencies)
+#   2. payments-api (no dependencies)
+#   3. notification-svc (no dependencies)
+#   4. orders-api (depends on: inventory, payments, notifications)
+#   5. api-gateway (depends on: orders, inventory, payments)
+#
+# APPLY:
+#   kubectl apply -f examples/01-ecommerce-platform.yaml
+#
+# ESTIMATED MONTHLY COST (AWS us-east-1):
+#   ~$850-1200 depending on traffic and database sizes
+#
+# =============================================================================
+
+---
+# =============================================================================
+# ORDERS SERVICE
+# =============================================================================
+# Core order management. Depends on inventory, payments, and notifications.
+# Production-critical with HA database and scaling.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: orders-api
+  namespace: ecommerce
+  labels:
+    app.kubernetes.io/part-of: ecommerce-platform
+    app.kubernetes.io/component: orders
+spec:
+  team: orders
+  owner: orders-team@company.com
+  tier: critical  # 99.99% SLA, highest priority alerts
+
+  workload:
+    image: ghcr.io/company/orders-api:v2.3.1
+    replicas: 3
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: grpc
+        containerPort: 9090
+      - name: metrics
+        containerPort: 9091
+    healthCheck:
+      path: /health
+      port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 3
+    env:
+      - name: LOG_LEVEL
+        value: info
+      - name: OTEL_SERVICE_NAME
+        value: orders-api
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://otel-collector.observability:4317
+
+  scaling:
+    minReplicas: 3
+    maxReplicas: 20
+    metrics:
+      - type: cpu
+        target: 70
+      - type: memory
+        target: 80
+
+  # Production PostgreSQL with HA
+  database:
+    type: postgres
+    version: "15"
+    size: medium  # Maps to: db.r6g.large on AWS (~$200/mo)
+    highAvailability: true  # Multi-AZ standby
+    backup:
+      enabled: true
+      retentionDays: 30  # Compliance requirement
+      window: "02:00-03:00"
+
+  # Redis for order caching and rate limiting
+  cache:
+    type: redis
+    size: small
+    highAvailability: true
+
+  # Async order processing
+  queue:
+    type: sqs
+    fifo: true  # Orders need exactly-once, ordered processing
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 3
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9091
+    tracing:
+      enabled: true
+      sampleRate: "0.1"
+    logging:
+      format: json
+
+  dependencies:
+    - name: inventory-api
+      namespace: ecommerce
+      required: true  # Block orders if inventory unavailable
+    - name: payments-api
+      namespace: ecommerce
+      required: true
+    - name: notification-svc
+      namespace: ecommerce
+      required: false  # Notifications are best-effort
+
+---
+# =============================================================================
+# INVENTORY SERVICE
+# =============================================================================
+# Real-time stock management. High read throughput, eventual consistency OK.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: inventory-api
+  namespace: ecommerce
+  labels:
+    app.kubernetes.io/part-of: ecommerce-platform
+    app.kubernetes.io/component: inventory
+spec:
+  team: inventory
+  owner: inventory-team@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/inventory-api:v1.8.0
+    replicas: 3
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+
+  scaling:
+    minReplicas: 3
+    maxReplicas: 15
+    metrics:
+      - type: cpu
+        target: 70
+
+  # PostgreSQL for inventory (read replicas in HA mode)
+  database:
+    type: postgres
+    version: "15"
+    size: medium
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 14
+
+  # Redis for product catalog cache (high read throughput)
+  cache:
+    type: redis
+    size: medium  # Larger cache for product catalog
+    highAvailability: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.05"  # Lower sampling for high-volume service
+    logging:
+      format: json
+
+  # No dependencies - base service
+
+---
+# =============================================================================
+# PAYMENTS SERVICE
+# =============================================================================
+# Payment processing. PCI-DSS compliance requirements.
+# Extra security: no cache (sensitive data), encrypted storage.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: payments-api
+  namespace: ecommerce
+  labels:
+    app.kubernetes.io/part-of: ecommerce-platform
+    app.kubernetes.io/component: payments
+    compliance: pci-dss
+spec:
+  team: payments
+  owner: payments-security@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/payments-api:v3.1.2
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
+    ports:
+      - name: https
+        containerPort: 8443  # TLS termination at app level
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8443
+    env:
+      - name: ENCRYPTION_KEY_ID
+        value: alias/payments-encryption-key
+      - name: PCI_MODE
+        value: "true"
+
+  scaling:
+    minReplicas: 2
+    maxReplicas: 10
+    metrics:
+      - type: cpu
+        target: 60  # More conservative for payment processing
+
+  # PostgreSQL with encryption at rest
+  database:
+    type: postgres
+    version: "15"
+    size: small  # Lower volume than orders
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 365  # PCI-DSS: 1 year retention
+      window: "01:00-02:00"
+
+  # NO CACHE - PCI-DSS: don't cache payment data
+  # cache: omitted intentionally
+
+  # Async payment confirmations
+  queue:
+    type: sqs
+    fifo: true
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 5
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "1.0"  # 100% tracing for audit trail
+    logging:
+      format: json
+
+---
+# =============================================================================
+# NOTIFICATION SERVICE
+# =============================================================================
+# Sends emails, SMS, push notifications. Stateless, queue-driven.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: notification-svc
+  namespace: ecommerce
+  labels:
+    app.kubernetes.io/part-of: ecommerce-platform
+    app.kubernetes.io/component: notifications
+spec:
+  team: platform
+  owner: platform-team@company.com
+  tier: standard  # Non-critical, best-effort delivery
+
+  workload:
+    image: ghcr.io/company/notification-svc:v1.2.0
+    replicas: 2
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+    env:
+      - name: SMTP_HOST
+        value: email-smtp.us-east-1.amazonaws.com
+      - name: TWILIO_ENABLED
+        value: "true"
+
+  scaling:
+    minReplicas: 2
+    maxReplicas: 8
+    metrics:
+      - type: cpu
+        target: 80
+
+  # No database - stateless service
+  # No cache needed
+
+  # Inbound notification queue
+  queue:
+    type: sqs
+    fifo: false  # Order doesn't matter for notifications
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 3
+
+  # S3 for email templates and attachments
+  storage:
+    type: s3
+    versioning: false
+    encryption: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.01"  # Very low sampling - high volume
+    logging:
+      format: json
+
+---
+# =============================================================================
+# API GATEWAY
+# =============================================================================
+# Public-facing gateway. Routes to internal services.
+# High availability, aggressive scaling, caching for static responses.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: api-gateway
+  namespace: ecommerce
+  labels:
+    app.kubernetes.io/part-of: ecommerce-platform
+    app.kubernetes.io/component: gateway
+spec:
+  team: platform
+  owner: platform-team@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/api-gateway:v2.0.0
+    replicas: 4
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: https
+        containerPort: 8443
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+      periodSeconds: 5  # Faster health checks for gateway
+
+  scaling:
+    minReplicas: 4
+    maxReplicas: 50  # Scale aggressively for traffic spikes
+    metrics:
+      - type: cpu
+        target: 50  # Scale earlier for latency-sensitive gateway
+
+  # Redis for rate limiting and response caching
+  cache:
+    type: redis
+    size: medium
+    highAvailability: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.01"  # Low sampling - very high volume
+    logging:
+      format: json
+
+  dependencies:
+    - name: orders-api
+      namespace: ecommerce
+      required: true
+    - name: inventory-api
+      namespace: ecommerce
+      required: true
+    - name: payments-api
+      namespace: ecommerce
+      required: true

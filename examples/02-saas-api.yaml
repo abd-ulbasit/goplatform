@@ -1,0 +1,351 @@
+# =============================================================================
+# PRODUCTION EXAMPLE: MULTI-TENANT SAAS API
+# =============================================================================
+#
+# This demonstrates a SaaS platform with:
+#   - Multi-tenant API backend
+#   - Tenant isolation at database level
+#   - High-throughput webhook processing
+#   - Analytics data lake
+#   - Rate limiting per tenant
+#
+# ARCHITECTURE:
+#   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+#   │   Tenants   │────►│  API Core   │────►│  Postgres   │
+#   └─────────────┘     └──────┬──────┘     │  (per-tenant│
+#                              │            │   schemas)  │
+#                              ▼            └─────────────┘
+#                       ┌─────────────┐
+#                       │   Redis     │ (rate limiting, caching)
+#                       └─────────────┘
+#                              │
+#                              ▼
+#   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+#   │  Webhooks   │◄────│    SQS      │◄────│  Analytics  │
+#   │  Processor  │     │   Queue     │     │   Worker    │
+#   └─────────────┘     └─────────────┘     └──────┬──────┘
+#                                                   │
+#                                                   ▼
+#                                           ┌─────────────┐
+#                                           │     S3      │
+#                                           │ (data lake) │
+#                                           └─────────────┘
+#
+# APPLY:
+#   kubectl create namespace saas-platform
+#   kubectl apply -f examples/02-saas-api.yaml
+#
+# =============================================================================
+
+---
+# =============================================================================
+# API CORE
+# =============================================================================
+# Main API serving all tenant requests. High availability, rate limiting.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: api-core
+  namespace: saas-platform
+  labels:
+    app.kubernetes.io/part-of: saas-platform
+    app.kubernetes.io/component: api
+spec:
+  team: platform
+  owner: cto@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/saas-api:v4.2.1
+    replicas: 5
+    resources:
+      requests:
+        cpu: 1
+        memory: 1Gi
+      limits:
+        cpu: 4
+        memory: 4Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: grpc
+        containerPort: 9090
+      - name: metrics
+        containerPort: 9091
+    healthCheck:
+      path: /api/v1/health
+      port: 8080
+      initialDelaySeconds: 20
+      periodSeconds: 10
+    env:
+      - name: TENANT_ISOLATION_MODE
+        value: schema  # Each tenant gets a PostgreSQL schema
+      - name: RATE_LIMIT_ENABLED
+        value: "true"
+      - name: JWT_ISSUER
+        value: https://auth.company.com
+
+  scaling:
+    minReplicas: 5
+    maxReplicas: 100
+    metrics:
+      - type: cpu
+        target: 60
+
+  # Multi-tenant PostgreSQL (schema-per-tenant)
+  database:
+    type: postgres
+    version: "15"
+    size: large  # db.r6g.xlarge - high connection count
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 90  # Enterprise data retention
+      window: "03:00-04:00"
+
+  # Redis for rate limiting + caching
+  cache:
+    type: redis
+    size: large  # High throughput for rate limiting
+    highAvailability: true
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9091
+    tracing:
+      enabled: true
+      sampleRate: "0.05"
+    logging:
+      format: json
+
+---
+# =============================================================================
+# WEBHOOK PROCESSOR
+# =============================================================================
+# Async processing of outbound webhooks to customer endpoints.
+# Handles retries, circuit breaking, dead letter queue.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: webhook-processor
+  namespace: saas-platform
+  labels:
+    app.kubernetes.io/part-of: saas-platform
+    app.kubernetes.io/component: webhooks
+spec:
+  team: integrations
+  owner: integrations@company.com
+  tier: standard
+
+  workload:
+    image: ghcr.io/company/webhook-processor:v2.1.0
+    replicas: 3
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+    env:
+      - name: WEBHOOK_TIMEOUT_MS
+        value: "30000"
+      - name: MAX_RETRIES
+        value: "5"
+      - name: CIRCUIT_BREAKER_THRESHOLD
+        value: "50"
+
+  scaling:
+    minReplicas: 3
+    maxReplicas: 20
+    metrics:
+      - type: cpu
+        target: 70
+
+  # No database - reads from SQS, makes HTTP calls
+
+  # Redis for circuit breaker state
+  cache:
+    type: redis
+    size: small
+    highAvailability: false  # Not critical
+
+  # Inbound webhook events queue
+  queue:
+    type: sqs
+    fifo: false  # Order doesn't matter, maximize throughput
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 5  # After 5 failures, DLQ for investigation
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.1"
+    logging:
+      format: json
+
+  dependencies:
+    - name: api-core
+      namespace: saas-platform
+      required: false  # Can process queue independently
+
+---
+# =============================================================================
+# ANALYTICS WORKER
+# =============================================================================
+# Processes events into data lake (S3). Batch processing, data aggregation.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: analytics-worker
+  namespace: saas-platform
+  labels:
+    app.kubernetes.io/part-of: saas-platform
+    app.kubernetes.io/component: analytics
+spec:
+  team: data
+  owner: data-team@company.com
+  tier: standard
+
+  workload:
+    image: ghcr.io/company/analytics-worker:v1.5.0
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2
+        memory: 4Gi  # Large memory for batch processing
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+    env:
+      - name: BATCH_SIZE
+        value: "1000"
+      - name: FLUSH_INTERVAL_SECONDS
+        value: "60"
+      - name: PARQUET_COMPRESSION
+        value: snappy
+
+  scaling:
+    minReplicas: 2
+    maxReplicas: 10
+    metrics:
+      - type: cpu
+        target: 80
+
+  # Analytics events queue (high volume)
+  queue:
+    type: sqs
+    fifo: false
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 3
+
+  # Data lake storage
+  storage:
+    type: s3
+    versioning: true  # Keep history of data files
+    encryption: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: false  # No tracing for batch workers
+    logging:
+      format: json
+
+---
+# =============================================================================
+# SCHEDULER SERVICE
+# =============================================================================
+# Cron-like scheduler for tenant scheduled jobs.
+# Leader election ensures single instance runs jobs.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: scheduler
+  namespace: saas-platform
+  labels:
+    app.kubernetes.io/part-of: saas-platform
+    app.kubernetes.io/component: scheduler
+spec:
+  team: platform
+  owner: platform@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/scheduler:v1.3.0
+    replicas: 2  # 2 for HA, but leader election means only 1 runs jobs
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+    env:
+      - name: LEADER_ELECTION_ENABLED
+        value: "true"
+      - name: LEADER_ELECTION_LEASE_DURATION
+        value: "15s"
+
+  # Replicas fixed - leader election handles active/standby
+  # No scaling - scheduler doesn't benefit from more instances
+
+  # PostgreSQL for job state
+  database:
+    type: postgres
+    version: "15"
+    size: small
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 30
+
+  # Redis for distributed locking
+  cache:
+    type: redis
+    size: small
+    highAvailability: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "1.0"  # Trace all scheduled jobs
+    logging:
+      format: json

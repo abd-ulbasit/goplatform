@@ -1,0 +1,360 @@
+# =============================================================================
+# PRODUCTION EXAMPLE: DATA PIPELINE
+# =============================================================================
+#
+# This demonstrates a real-time data pipeline with:
+#   - Event ingestion service (receives events from clients)
+#   - Kafka for event streaming (using SQS as simplified alternative)
+#   - Stream processor for real-time transformations
+#   - Batch aggregator for hourly/daily rollups
+#   - S3 data lake for long-term storage
+#   - PostgreSQL for metadata and state
+#
+# DATA FLOW:
+#   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+#   │   Clients   │────►│   Ingest    │────►│    SQS      │
+#   │  (events)   │     │   Service   │     │   Queue     │
+#   └─────────────┘     └─────────────┘     └──────┬──────┘
+#                                                   │
+#                          ┌────────────────────────┼────────────────────────┐
+#                          │                        │                        │
+#                          ▼                        ▼                        ▼
+#                   ┌─────────────┐          ┌─────────────┐          ┌─────────────┐
+#                   │   Stream    │          │    Batch    │          │  Real-time  │
+#                   │  Processor  │          │ Aggregator  │          │  Dashboard  │
+#                   └──────┬──────┘          └──────┬──────┘          └─────────────┘
+#                          │                        │
+#                          ▼                        ▼
+#                   ┌─────────────┐          ┌─────────────┐
+#                   │   S3 Raw    │          │  S3 Agg     │
+#                   │   Events    │          │   Data      │
+#                   └─────────────┘          └─────────────┘
+#
+# APPLY:
+#   kubectl create namespace data-pipeline
+#   kubectl apply -f examples/04-data-pipeline.yaml
+#
+# =============================================================================
+
+---
+# =============================================================================
+# EVENT INGESTION SERVICE
+# =============================================================================
+# High-throughput event receiver. Validates and forwards to queue.
+# Must handle bursts (e.g., during product launches).
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: event-ingest
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/part-of: data-pipeline
+    app.kubernetes.io/component: ingest
+spec:
+  team: data
+  owner: data-eng@company.com
+  tier: critical  # Data loss is unacceptable
+
+  workload:
+    image: ghcr.io/company/event-ingest:v2.1.0
+    replicas: 5
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: grpc
+        containerPort: 9090
+      - name: metrics
+        containerPort: 9091
+    healthCheck:
+      path: /health
+      port: 8080
+      periodSeconds: 5  # Fast health checks for traffic routing
+    env:
+      - name: BATCH_SIZE
+        value: "100"
+      - name: FLUSH_INTERVAL_MS
+        value: "100"
+      - name: SCHEMA_VALIDATION
+        value: "true"
+
+  scaling:
+    minReplicas: 5
+    maxReplicas: 50
+    metrics:
+      - type: cpu
+        target: 50  # Scale early - we're latency sensitive
+
+  # Redis for deduplication (idempotency keys)
+  cache:
+    type: redis
+    size: medium
+    highAvailability: true
+
+  # Main event queue
+  queue:
+    type: sqs
+    fifo: false  # Maximize throughput, order handled downstream
+    deadLetterQueue:
+      enabled: true
+      maxReceiveCount: 3
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9091
+    tracing:
+      enabled: true
+      sampleRate: "0.01"  # Very high volume, low sampling
+    logging:
+      format: json
+
+---
+# =============================================================================
+# STREAM PROCESSOR
+# =============================================================================
+# Real-time event processing. Enrichment, transformation, routing.
+# Consumes from SQS, writes to S3 and downstream queues.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: stream-processor
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/part-of: data-pipeline
+    app.kubernetes.io/component: processor
+spec:
+  team: data
+  owner: data-eng@company.com
+  tier: critical
+
+  workload:
+    image: ghcr.io/company/stream-processor:v3.0.0
+    replicas: 10
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 4
+        memory: 8Gi  # Large memory for windowed aggregations
+    ports:
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 9090
+    env:
+      - name: WINDOW_SIZE_SECONDS
+        value: "60"
+      - name: CHECKPOINT_INTERVAL_MS
+        value: "10000"
+      - name: PARALLELISM
+        value: "4"
+
+  scaling:
+    minReplicas: 10
+    maxReplicas: 100
+    metrics:
+      - type: cpu
+        target: 70
+
+  # PostgreSQL for processing state (checkpoints, offsets)
+  database:
+    type: postgres
+    version: "15"
+    size: small
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 7
+
+  # Redis for lookup tables and caching
+  cache:
+    type: redis
+    size: large
+    highAvailability: true
+
+  # S3 for raw event storage (data lake)
+  storage:
+    type: s3
+    versioning: false  # Raw events don't need versioning
+    encryption: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: false  # Stream processing, no request tracing
+    logging:
+      format: json
+
+  dependencies:
+    - name: event-ingest
+      namespace: data-pipeline
+      required: false  # Can process backlog independently
+
+---
+# =============================================================================
+# BATCH AGGREGATOR
+# =============================================================================
+# Hourly/daily batch jobs for data aggregation.
+# Runs as periodic job, writes to aggregated data bucket.
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: batch-aggregator
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/part-of: data-pipeline
+    app.kubernetes.io/component: aggregator
+spec:
+  team: data
+  owner: data-eng@company.com
+  tier: standard
+
+  workload:
+    image: ghcr.io/company/batch-aggregator:v1.8.0
+    replicas: 3
+    resources:
+      requests:
+        cpu: 2
+        memory: 4Gi
+      limits:
+        cpu: 8
+        memory: 16Gi  # Large memory for aggregations
+    ports:
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 9090
+    env:
+      - name: AGGREGATION_WINDOW
+        value: "1h"
+      - name: OUTPUT_FORMAT
+        value: parquet
+      - name: COMPRESSION
+        value: snappy
+
+  scaling:
+    minReplicas: 3
+    maxReplicas: 20
+    metrics:
+      - type: cpu
+        target: 80
+
+  # PostgreSQL for job state and metadata
+  database:
+    type: postgres
+    version: "15"
+    size: small
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 30
+
+  # S3 for aggregated data output
+  storage:
+    type: s3
+    versioning: true  # Keep history of aggregated files
+    encryption: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: false
+    logging:
+      format: json
+
+---
+# =============================================================================
+# REALTIME DASHBOARD API
+# =============================================================================
+# Serves real-time metrics to dashboards. Low latency, high read throughput.
+# Reads from Redis (hot data) and PostgreSQL (historical).
+
+apiVersion: platform.platform.goplatform.io/v1alpha1
+kind: Application
+metadata:
+  name: dashboard-api
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/part-of: data-pipeline
+    app.kubernetes.io/component: dashboard
+spec:
+  team: data
+  owner: data-eng@company.com
+  tier: standard
+
+  workload:
+    image: ghcr.io/company/dashboard-api:v2.0.0
+    replicas: 3
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    ports:
+      - name: http
+        containerPort: 8080
+      - name: websocket
+        containerPort: 8081
+      - name: metrics
+        containerPort: 9090
+    healthCheck:
+      path: /health
+      port: 8080
+
+  scaling:
+    minReplicas: 3
+    maxReplicas: 15
+    metrics:
+      - type: cpu
+        target: 70
+
+  # PostgreSQL for historical data queries
+  database:
+    type: postgres
+    version: "15"
+    size: medium
+    highAvailability: true
+    backup:
+      enabled: true
+      retentionDays: 14
+
+  # Redis for real-time metrics (last 5 minutes)
+  cache:
+    type: redis
+    size: medium
+    highAvailability: true
+
+  observability:
+    metrics:
+      enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.1"
+    logging:
+      format: json
+
+  dependencies:
+    - name: stream-processor
+      namespace: data-pipeline
+      required: false
+    - name: batch-aggregator
+      namespace: data-pipeline
+      required: false

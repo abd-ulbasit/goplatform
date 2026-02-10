@@ -1,5 +1,77 @@
 # System Patterns
 
+## Layered Architecture with Pluggable Interfaces
+
+GoPlatform is designed as a **layered platform** where each layer can be replaced independently. This enables users to swap implementations without changing the layers above.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         LAYER 1: DEVELOPER INTERFACE                        │
+│  kubectl apply | gpctl CLI | REST API | GitOps | Developer Portal           │
+│                                                                             │
+│  Users interact here. Abstracts away all infrastructure complexity.         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      LAYER 2: APPLICATION CRD (GoPlatform)                  │
+│  Application, Database, Cache, Queue - cloud-agnostic specifications        │
+│                                                                             │
+│  WHAT IT DOES: Defines "I want a database" without saying "RDS" or "GCP"    │
+│  INTERFACE: Kubernetes CRD (Application, etc.)                              │
+│  PLUGGABLE: No - this is the GoPlatform core abstraction                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    LAYER 3: ORCHESTRATION CONTROLLER                        │
+│  Watches CRDs, orchestrates provisioning, manages lifecycle                 │
+│                                                                             │
+│  WHAT IT DOES: Translates Application spec → commands to Layer 4            │
+│  INTERFACE: InfrastructureProvider Go interface                             │
+│  PLUGGABLE: Yes - could be our controller or a different orchestrator       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    LAYER 4: INFRASTRUCTURE PROVIDER                         │
+│  Actually provisions cloud resources                                        │
+│                                                                             │
+│  OPTIONS (plug-and-play):                                                   │
+│  ┌───────────────────┬─────────────────────────────────────────────────────┐│
+│  │ TerraformProvider │ Default. Uses Terraform + AWS/GCP/Azure modules     ││
+│  │ CrossplaneProvider│ Alternative. Delegate to Crossplane XRDs            ││
+│  │ PulumiProvider    │ Alternative. Uses Pulumi for provisioning           ││
+│  │ LocalProvider     │ Dev/test. CloudNativePG, Redis operator             ││
+│  │ MockProvider      │ Testing. Returns fake endpoints                     ││
+│  └───────────────────┴─────────────────────────────────────────────────────┘│
+│                                                                             │
+│  INTERFACE: InfrastructureProvider Go interface defined below               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LAYER 5: CLOUD RESOURCES                             │
+│  AWS RDS | GCP Cloud SQL | Azure DB | LocalStack | CloudNativePG            │
+│                                                                             │
+│  Actual cloud-managed or local resources                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Matters
+
+1. **Crossplane Integration**: User wants Crossplane? Implement `CrossplaneProvider` that creates Crossplane `Claim` CRDs instead of running Terraform.
+
+2. **Multi-Cloud**: Each cloud gets its own provider implementation. Controller doesn't change.
+
+3. **Testing**: Use `MockProvider` in tests without needing real cloud resources.
+
+4. **Gradual Migration**: Start with TerraformProvider, migrate to CrossplaneProvider later without changing Applications.
+
+5. **Vendor Lock-In Avoidance**: Application CRDs are portable. Only providers are cloud-specific.
+
+---
+
 ## Architecture Overview
 
 GoPlatform follows a layered architecture with clear separation of concerns:
@@ -7,13 +79,13 @@ GoPlatform follows a layered architecture with clear separation of concerns:
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Developer Interface                          │
-│  kubectl apply | gpctl CLI | REST API | GitOps                     │
+│  kubectl apply | gpctl CLI | REST API | GitOps                      │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      Kubernetes API Server                          │
-│  Application CRD | Database CRD | Cache CRD                        │
+│  Application CRD | Database CRD | Cache CRD                         │
 └─────────────────────────────────────────────────────────────────────┘
                                 │ watch
                                 ▼
@@ -26,7 +98,7 @@ GoPlatform follows a layered architecture with clear separation of concerns:
                 ▼               ▼               ▼
 ┌─────────────────────┐ ┌─────────────┐ ┌──────────────────┐
 │ Kubernetes Resources│ │ AWS Infra   │ │ Observability    │
-│ Deployment, Service │ │ via Terraform│ │ Prometheus, etc  │
+│ Deployment, Service │ │ via Terraform│ │ Prometheus, etc │
 └─────────────────────┘ └─────────────┘ └──────────────────┘
 ```
 
@@ -130,25 +202,42 @@ Application reads DATABASE_URL from env
 | Terraform State | S3 + DynamoDB per-app isolation | Standard pattern, proven |
 | Local K8s | Colima with K8s 1.33+ | Good macOS support, avoid extended support costs |
 
-## Infrastructure Provider Pattern
+## Infrastructure Provider Pattern (Pluggable Layer 4)
 
 ```go
-// Adapter pattern - controller doesn't know which cloud
-type InfrastructureProvider interface {
-    ProvisionDatabase(ctx, app, spec) → (DatabaseStatus, error)
-    ProvisionCache(ctx, app, spec) → (CacheStatus, error)
-    ProvisionQueue(ctx, app, spec) → (QueueStatus, error)
-    Destroy(ctx, app) → error
-    GetStatus(ctx, app) → (InfrastructureStatus, error)
-    EstimateCost(ctx, app) → (CostEstimate, error)
-}
+// =============================================================================
+// INFRASTRUCTURE PROVIDER INTERFACE
+// =============================================================================
+// This is the pluggable abstraction for Layer 4.
+// The controller calls these methods without knowing the implementation.
 
-// Implementations
-AWSProvider    → Terraform + RDS/ElastiCache/SQS
-GCPProvider    → Terraform + CloudSQL/Memorystore (future)
-LocalProvider  → CloudNativePG/Redis operators (for dev/preview)
-MockProvider   → For testing
+type InfrastructureProvider interface {
+    ProvisionDatabase(ctx context.Context, app *Application, spec *DatabaseSpec) (*DatabaseStatus, error)
+    ProvisionCache(ctx context.Context, app *Application, spec *CacheSpec) (*CacheStatus, error)
+    ProvisionQueue(ctx context.Context, app *Application, spec *QueueSpec) (*QueueStatus, error)
+    ProvisionStorage(ctx context.Context, app *Application, spec *StorageSpec) (*StorageStatus, error)
+    Destroy(ctx context.Context, app *Application) error
+    GetStatus(ctx context.Context, app *Application) (*InfrastructureStatus, error)
+    EstimateCost(ctx context.Context, app *Application) (*CostEstimate, error)
+}
 ```
+
+### Provider Implementations
+
+| Provider | Backend | Use Case |
+|----------|---------|----------|
+| `TerraformProvider` | Terraform + AWS/GCP modules | Production default |
+| `CrossplaneProvider` | Crossplane XRDs | Alternative - use existing Crossplane |
+| `PulumiProvider` | Pulumi | Alternative - code-based IaC |
+| `LocalProvider` | CloudNativePG, Redis operator | Local dev, preview envs |
+| `MockProvider` | In-memory fake | Unit/integration testing |
+
+### Why Pluggable
+
+- **Crossplane users**: Implement `CrossplaneProvider` that creates Crossplane Claims
+- **Multi-cloud**: Each cloud can have its own provider
+- **Testing**: MockProvider returns fake endpoints instantly
+- **Migration**: Switch from Terraform to Crossplane without changing Applications
 
 ## Anti-Patterns to Avoid
 
