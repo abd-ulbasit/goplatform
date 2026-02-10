@@ -143,6 +143,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -437,10 +438,9 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Track if this is initial provisioning (no Ready condition yet)
 	isInitialProvisioning := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeReady) == nil
 
-	// Set phase to Provisioning during work
-	if app.Status.Phase != platformv1alpha1.ApplicationProvisioning && isInitialProvisioning {
-		app.Status.Phase = platformv1alpha1.ApplicationProvisioning
-		if err := r.Status().Update(ctx, &app); err != nil {
+	// Set phase to Provisioning during initial work
+	if isInitialProvisioning {
+		if err := r.updatePhase(ctx, &app, platformv1alpha1.ApplicationProvisioning); err != nil {
 			logger.Error(err, "failed to update phase to Provisioning")
 			return ctrl.Result{}, err
 		}
@@ -541,6 +541,8 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return err
 		}
 
+		originalStatus := app.Status
+
 		// Update conditions
 		r.updateConditions(ctx, &app, deploymentReady, serviceReady)
 
@@ -553,6 +555,11 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		// Set observed generation
 		app.Status.ObservedGeneration = app.Generation
+
+		// Persist status only when something changed
+		if reflect.DeepEqual(originalStatus, app.Status) {
+			return nil
+		}
 
 		// Persist status
 		return r.Status().Update(ctx, &app)
@@ -1464,60 +1471,258 @@ func (r *ApplicationReconciler) buildLabels(app *platformv1alpha1.Application) m
 
 // updateConditions sets the status conditions based on current state.
 func (r *ApplicationReconciler) updateConditions(ctx context.Context, app *platformv1alpha1.Application, deploymentReady, serviceReady bool) {
-	now := metav1.Now()
+	observedGeneration := app.Generation
 
-	// Workload condition
-	workloadCondition := metav1.Condition{
-		Type:               platformv1alpha1.ConditionTypeWorkloadReady,
-		LastTransitionTime: now,
-	}
+	// =========================================================================
+	// WORKLOAD CONDITION
+	// =========================================================================
+	//
+	// If no workload is specified, we treat workload as ready (infra-only app).
+	// Otherwise, readiness reflects Deployment status.
+	// =========================================================================
+
+	workloadStatus := metav1.ConditionFalse
+	workloadReason := "DeploymentNotReady"
+	workloadMessage := "Deployment is still progressing"
+
 	if app.Spec.Workload == nil {
-		workloadCondition.Status = metav1.ConditionTrue
-		workloadCondition.Reason = "NoWorkload"
-		workloadCondition.Message = "No workload specified"
+		workloadStatus = metav1.ConditionTrue
+		workloadReason = "NoWorkload"
+		workloadMessage = "No workload specified"
 	} else if deploymentReady {
-		workloadCondition.Status = metav1.ConditionTrue
-		workloadCondition.Reason = "DeploymentReady"
-		workloadCondition.Message = "Deployment has reached desired state"
-	} else {
-		workloadCondition.Status = metav1.ConditionFalse
-		workloadCondition.Reason = "DeploymentNotReady"
-		workloadCondition.Message = "Deployment is still progressing"
+		workloadStatus = metav1.ConditionTrue
+		workloadReason = "DeploymentReady"
+		workloadMessage = "Deployment has reached desired state"
 	}
-	meta.SetStatusCondition(&app.Status.Conditions, workloadCondition)
 
-	// Overall Ready condition
-	readyCondition := metav1.Condition{
-		Type:               platformv1alpha1.ConditionTypeReady,
-		LastTransitionTime: now,
+	workloadCondition := platformv1alpha1.NewCondition(
+		platformv1alpha1.ConditionTypeWorkloadReady,
+		workloadStatus,
+		workloadReason,
+		workloadMessage,
+		observedGeneration,
+	)
+	r.applyCondition(ctx, app, workloadCondition)
+
+	// =========================================================================
+	// INFRASTRUCTURE CONDITIONS
+	// =========================================================================
+	//
+	// At this milestone we haven't implemented provisioning yet.
+	// We still report conditions so users can see *what is expected*.
+	//
+	// - If a component is NOT requested, its condition is True (NotRequested)
+	// - If a component IS requested, its condition is False (ProvisioningPending)
+	//
+	// This mirrors how Crossplane reports Ready=False while resources are
+	// being created, even if the provider is not yet wired in.
+	// =========================================================================
+
+	databaseReady := r.setInfrastructureCondition(
+		ctx,
+		app,
+		platformv1alpha1.ConditionTypeDatabaseReady,
+		app.Spec.Database != nil,
+		"Database",
+	)
+	cacheReady := r.setInfrastructureCondition(
+		ctx,
+		app,
+		platformv1alpha1.ConditionTypeCacheReady,
+		app.Spec.Cache != nil,
+		"Cache",
+	)
+	queueReady := r.setInfrastructureCondition(
+		ctx,
+		app,
+		platformv1alpha1.ConditionTypeQueueReady,
+		app.Spec.Queue != nil,
+		"Queue",
+	)
+	storageReady := r.setInfrastructureCondition(
+		ctx,
+		app,
+		platformv1alpha1.ConditionTypeStorageReady,
+		app.Spec.Storage != nil,
+		"Storage",
+	)
+
+	// Ensure Infrastructure status object exists when any infra is requested
+	r.ensureInfrastructureStatus(app)
+
+	// =========================================================================
+	// OVERALL READY CONDITION
+	// =========================================================================
+
+	infraReady := databaseReady && cacheReady && queueReady && storageReady
+	overallReady := workloadStatus == metav1.ConditionTrue && serviceReady && infraReady
+
+	readyReason := "ResourcesNotReady"
+	readyMessage := "Some resources are still being provisioned"
+	if overallReady {
+		readyReason = "AllResourcesReady"
+		readyMessage = "All resources are ready"
+	} else if !serviceReady {
+		readyReason = "ServiceNotReady"
+		readyMessage = "Service is not ready"
+	} else if workloadStatus != metav1.ConditionTrue {
+		readyReason = "WorkloadNotReady"
+		readyMessage = "Workload is not ready"
+	} else if !infraReady {
+		readyReason = "InfrastructureNotReady"
+		readyMessage = "Infrastructure provisioning is pending"
 	}
-	if deploymentReady && serviceReady {
-		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = "AllResourcesReady"
-		readyCondition.Message = "All resources are ready"
-	} else {
-		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "ResourcesNotReady"
-		readyCondition.Message = "Some resources are still being provisioned"
+
+	readyStatus := metav1.ConditionFalse
+	if overallReady {
+		readyStatus = metav1.ConditionTrue
 	}
-	meta.SetStatusCondition(&app.Status.Conditions, readyCondition)
+
+	readyCondition := platformv1alpha1.NewCondition(
+		platformv1alpha1.ConditionTypeReady,
+		readyStatus,
+		readyReason,
+		readyMessage,
+		observedGeneration,
+	)
+	r.applyCondition(ctx, app, readyCondition)
 }
 
 // setFailedCondition updates status to indicate a failure.
 func (r *ApplicationReconciler) setFailedCondition(ctx context.Context, app *platformv1alpha1.Application, reason, message string) {
-	app.Status.Phase = platformv1alpha1.ApplicationFailed
-
-	failedCondition := metav1.Condition{
-		Type:               platformv1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
+	if app == nil {
+		return
 	}
-	meta.SetStatusCondition(&app.Status.Conditions, failedCondition)
 
-	if err := r.Status().Update(ctx, app); err != nil {
-		log.FromContext(ctx).Error(err, "failed to update failed status")
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest platformv1alpha1.Application
+		if err := r.Get(ctx, client.ObjectKeyFromObject(app), &latest); err != nil {
+			return err
+		}
+
+		originalStatus := latest.Status
+
+		latest.Status.Phase = platformv1alpha1.ApplicationFailed
+		latest.Status.ObservedGeneration = latest.Generation
+
+		failedCondition := platformv1alpha1.NewCondition(
+			platformv1alpha1.ConditionTypeReady,
+			metav1.ConditionFalse,
+			reason,
+			message,
+			latest.Generation,
+		)
+		r.applyCondition(ctx, &latest, failedCondition)
+
+		if reflect.DeepEqual(originalStatus, latest.Status) {
+			return nil
+		}
+
+		return r.Status().Update(ctx, &latest)
+	})
+
+	if retryErr != nil {
+		log.FromContext(ctx).Error(retryErr, "failed to update failed status")
+	}
+}
+
+// updatePhase updates the status phase with retry-on-conflict handling.
+func (r *ApplicationReconciler) updatePhase(ctx context.Context, app *platformv1alpha1.Application, phase platformv1alpha1.ApplicationPhase) error {
+	if app == nil {
+		return nil
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest platformv1alpha1.Application
+		if err := r.Get(ctx, client.ObjectKeyFromObject(app), &latest); err != nil {
+			return err
+		}
+
+		if latest.Status.Phase == phase {
+			return nil
+		}
+
+		originalStatus := latest.Status
+		latest.Status.Phase = phase
+		latest.Status.ObservedGeneration = latest.Generation
+
+		if reflect.DeepEqual(originalStatus, latest.Status) {
+			return nil
+		}
+
+		return r.Status().Update(ctx, &latest)
+	})
+}
+
+// applyCondition sets a condition and emits an Event when the status changes.
+func (r *ApplicationReconciler) applyCondition(ctx context.Context, app *platformv1alpha1.Application, condition metav1.Condition) {
+	if app == nil {
+		return
+	}
+
+	previous := platformv1alpha1.GetCondition(app.Status.Conditions, condition.Type)
+	previousStatus := metav1.ConditionUnknown
+	if previous != nil {
+		previousStatus = previous.Status
+	}
+
+	changed := platformv1alpha1.SetCondition(&app.Status.Conditions, condition)
+	if !changed || previousStatus == condition.Status {
+		return
+	}
+
+	if r.Recorder == nil {
+		return
+	}
+
+	eventType := corev1.EventTypeNormal
+	if condition.Status == metav1.ConditionFalse {
+		eventType = corev1.EventTypeWarning
+	}
+
+	// Use the condition reason as the event reason for consistency.
+	r.Recorder.Event(app, eventType, condition.Reason, fmt.Sprintf("%s: %s", condition.Type, condition.Message))
+}
+
+// setInfrastructureCondition sets a standard condition for infra components.
+// Returns true if the component is considered ready.
+func (r *ApplicationReconciler) setInfrastructureCondition(
+	ctx context.Context,
+	app *platformv1alpha1.Application,
+	conditionType string,
+	requested bool,
+	componentName string,
+) bool {
+	status := metav1.ConditionFalse
+	reason := fmt.Sprintf("%sProvisioningPending", componentName)
+	message := fmt.Sprintf("%s provisioning is pending", componentName)
+
+	if !requested {
+		status = metav1.ConditionTrue
+		reason = fmt.Sprintf("%sNotRequested", componentName)
+		message = fmt.Sprintf("%s not requested", componentName)
+	}
+
+	condition := platformv1alpha1.NewCondition(
+		conditionType,
+		status,
+		reason,
+		message,
+		app.Generation,
+	)
+
+	r.applyCondition(ctx, app, condition)
+	return status == metav1.ConditionTrue
+}
+
+// ensureInfrastructureStatus initializes Infrastructure status when needed.
+func (r *ApplicationReconciler) ensureInfrastructureStatus(app *platformv1alpha1.Application) {
+	if app == nil || app.Status.Infrastructure != nil {
+		return
+	}
+
+	if app.Spec.Database != nil || app.Spec.Cache != nil || app.Spec.Queue != nil || app.Spec.Storage != nil {
+		app.Status.Infrastructure = &platformv1alpha1.InfrastructureStatus{}
 	}
 }
 

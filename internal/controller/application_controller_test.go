@@ -376,6 +376,26 @@ var _ = Describe("Application Controller", func() {
 			workloadCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeWorkloadReady)
 			Expect(workloadCondition).NotTo(BeNil())
 
+			databaseCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeDatabaseReady)
+			Expect(databaseCondition).NotTo(BeNil())
+			Expect(databaseCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(databaseCondition.Reason).To(Equal("DatabaseNotRequested"))
+
+			cacheCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeCacheReady)
+			Expect(cacheCondition).NotTo(BeNil())
+			Expect(cacheCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cacheCondition.Reason).To(Equal("CacheNotRequested"))
+
+			queueCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeQueueReady)
+			Expect(queueCondition).NotTo(BeNil())
+			Expect(queueCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(queueCondition.Reason).To(Equal("QueueNotRequested"))
+
+			storageCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeStorageReady)
+			Expect(storageCondition).NotTo(BeNil())
+			Expect(storageCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(storageCondition.Reason).To(Equal("StorageNotRequested"))
+
 			// Verify observed generation
 			Expect(app.Status.ObservedGeneration).To(Equal(app.Generation))
 		})
@@ -464,6 +484,70 @@ var _ = Describe("Application Controller", func() {
 				}
 				return app.Status.Phase
 			}, timeout, interval).Should(Equal(platformv1alpha1.ApplicationReady))
+
+			readyCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeReady)
+			Expect(readyCondition).NotTo(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	// =========================================================================
+	// TEST: INFRASTRUCTURE CONDITIONS (REQUESTED COMPONENTS)
+	// =========================================================================
+
+	Context("When reconciling an Application with requested infrastructure", func() {
+		const resourceName = "test-app-infra-requested"
+		var typeNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			typeNamespacedName = types.NamespacedName{
+				Name:      resourceName,
+				Namespace: "default",
+			}
+
+			app := createTestApplication(resourceName, "default", true)
+			app.Spec.Database = &platformv1alpha1.DatabaseSpec{
+				Type:    platformv1alpha1.DatabasePostgres,
+				Version: "15",
+			}
+
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			app := &platformv1alpha1.Application{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, app); err == nil {
+				app.Finalizers = nil
+				_ = k8sClient.Update(ctx, app)
+				_ = k8sClient.Delete(ctx, app)
+			}
+		})
+
+		It("should mark database condition as pending", func() {
+			reconciler := createReconciler()
+
+			// First reconcile - adds finalizer
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+
+			// Second reconcile - updates status
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+
+			By("Verifying DatabaseReady condition is pending")
+			app := &platformv1alpha1.Application{}
+			Eventually(func() *metav1.Condition {
+				if err := k8sClient.Get(ctx, typeNamespacedName, app); err != nil {
+					return nil
+				}
+				return meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeDatabaseReady)
+			}, timeout, interval).ShouldNot(BeNil())
+
+			databaseCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeDatabaseReady)
+			Expect(databaseCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(databaseCondition.Reason).To(Equal("DatabaseProvisioningPending"))
 		})
 	})
 
