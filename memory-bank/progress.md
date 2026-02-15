@@ -1,72 +1,35 @@
 # Memory Bank Progress
 
 ## Summary
-**Project:** GoPlatform - Internal Developer Platform  
-**Status:** Phase 1 - Operator Foundation  
-**Current Milestone:** M1 (Project Setup & CRD Design) - Ready to Start
-**Total Milestones:** 35
+**Project:** GoPlatform - Internal Developer Platform
+**Status:** Phase 2 - Real-World Operator
+**Current Milestone:** M6 (End-to-End Integration) - Not Started
+**Total Milestones:** 12
 
 ## What Works
-- Project structure created
-- Documentation in place
-- Memory bank initialized
-- Architecture decisions made
-- Unique features identified
-- Ready for Milestone 1
+- Project structure created with kubebuilder v4
+- Application CRD v1alpha1 with cloud-agnostic schema
+- ApplicationReconciler with full reconciliation loop
+- Kubernetes resource generation (Deployment, Service, ConfigMap, Secret, HPA, PDB)
+- Status conditions and finalizer pattern
+- InfrastructureProvider interface with factory pattern
+- KubernetesProvider (CNPG, Redis, RabbitMQ, PVC)
+- MockProvider for testing
+- Typed error system
+- Unit tests with envtest (66.9% coverage)
 
 ## What's Left to Build
 
-### Phase 1: Operator Foundation (M1-M5)
-- [ ] kubebuilder project setup (M1)
-- [ ] Application CRD cloud-agnostic design (M1)
-- [ ] Controller reconciliation (M2)
-- [ ] K8s resource generation (M3)
-- [ ] Status management & conditions (M4)
-- [ ] Finalizers & cleanup (M5)
+### Phase 2: Real-World Operator (M6-M9)
+- [ ] End-to-end integration with real cluster (M6)
+- [ ] Admission webhooks - validating + mutating (M7)
+- [ ] Observability integration - ServiceMonitor, PrometheusRule, custom metrics (M8)
+- [ ] Drift detection & self-healing (M9)
 
-### Phase 2: Infrastructure Providers (M6-M12)
-- [ ] InfrastructureProvider interface (M6)
-- [ ] Terraform runner (M7)
-- [ ] State management (M8)
-- [ ] RDS module (M9)
-- [ ] ElastiCache module (M10)
-- [ ] SQS module (M11)
-- [ ] IAM & IRSA (M12)
-
-### Phase 3: Credential Management (M13-M15)
-- [ ] Secrets generation (M13)
-- [ ] External Secrets integration (M14)
-- [ ] Secrets rotation (M15)
-
-### Phase 4: Platform API & CLI (M16-M19)
-- [ ] REST API server (M16)
-- [ ] Cost estimation API (M17)
-- [ ] gpctl CLI (M18)
-- [ ] Webhook events (M19)
-
-### Phase 5: Observability (M20-M23)
-- [ ] ServiceMonitor generation (M20)
-- [ ] Grafana dashboard generation (M21)
-- [ ] AlertRule generation (M22)
-- [ ] OpenTelemetry configuration (M23)
-
-### Phase 6: Service Catalog (M24-M27)
-- [ ] Catalog data model (M24)
-- [ ] Dependency tracking (M25)
-- [ ] Team ownership (M26)
-- [ ] Resource templates (M27)
-
-### Phase 7: Developer Experience (M28-M31)
-- [ ] Environment promotion (M28)
-- [ ] Preview environments (M29)
-- [ ] Local development mode (M30)
-- [ ] Drift detection (M31)
-
-### Phase 8: Production Hardening (M32-M35)
-- [ ] Policy enforcement (M32)
-- [ ] Team quotas & budgets (M33)
-- [ ] Audit logging (M34)
-- [ ] High availability & scaling (M35)
+### Phase 3: Advanced Patterns (M10-M12)
+- [ ] Multi-version CRD & conversion webhooks (M10)
+- [ ] Policy integration with Kyverno (M11)
+- [ ] E2E testing & CI hardening (M12)
 
 ## Session History
 
@@ -81,17 +44,9 @@
 - Initialized memory bank
 
 **Decisions:**
-- Chose 6-phase approach for development
+- Chose phased approach for development
 - Designed Application CRD schema
-- Decided on Terraform for AWS provisioning
-
-**Learned:**
 - Platform engineering patterns (golden paths, self-service)
-- IDP comparison (Backstage vs Crossplane vs TFC)
-
-**Next Session:**
-- Begin M1: kubebuilder project initialization
-- Design detailed CRD schema
 
 ---
 
@@ -99,38 +54,59 @@
 **Focus:** Architectural decisions and feature expansion
 
 **Completed:**
-- Designed credential flow (Terraform → K8s Secrets → Application)
+- Designed credential flow
 - Designed InfrastructureProvider adapter pattern
-- Evaluated RBAC approaches (K8s RBAC + policies first)
-- Added 8 unique features (Cost Estimation, Preview Envs, Drift Detection, etc.)
-- Expanded to 35 milestones across 8 phases
-- Added development.instructions.md for Serena and local K8s
-- Cleaned up README.md with focus on differentiators
+- Evaluated RBAC approaches
 
 **Decisions:**
 - InfrastructureProvider interface for cloud abstraction
-- K8s Secrets + External Secrets Operator for credentials
-- K8s RBAC + Kyverno first, platform RBAC later
-- Colima with K8s 1.33+ for local development
-- S3 + DynamoDB for Terraform state isolation
+- K8s Secrets for credentials
+- K8s RBAC + Kyverno first
 
-**Learned:**
-- Credential injection patterns (ESO, Service Binding)
-- Adapter pattern for multi-cloud support
-- Crossplane XRD complexity and alternatives
+---
 
-**Next Session:**
-- Begin M1: kubebuilder project initialization
-- Initialize project with domain `platform.goplatform.io`
-- Scaffold Application CRD v1alpha1
-- Set up Colima local cluster
+### Session 3 - Milestone 7 Implementation (old numbering)
+**Focus:** Kubernetes-native provider (CNPG, RedisFailover, RabbitMQ)
+
+**Completed:**
+- Implemented KubernetesProvider with operator CRD provisioning
+- Added Secrets with connection strings per resource
+- Added CRD discovery checks and clear error messages
+- Added cleanup logic for spec removal and Destroy()
+- Added unit tests (fake client + discovery)
+
+**Decisions:**
+- Use CloudNativePG Cluster CRD for PostgreSQL
+- Use Spotahome RedisFailover CRD for Redis
+- Use RabbitMQ Cluster Operator CRD for queues
+- Use PVCs for storage by default
+
+---
+
+### Session 4 - Scope Revision
+**Focus:** Project scope review and roadmap revision
+
+**Completed:**
+- Reviewed entire project scope with architectural analysis
+- Identified scope creep (36 milestones was a wishlist, not a plan)
+- Revised to 3 phases, 12 milestones focused on K8s learning depth
+- Dropped Terraform integration (6 milestones), REST API, CLI, Service Catalog
+- Consolidated completed milestones (old M4+M5 → new M4, old M6+M7 → new M5)
+- Fixed documentation inconsistencies (milestones marked NOT STARTED that were done)
+- Updated all project docs to reflect new scope
+
+**Decisions:**
+- Kubernetes-only (no Terraform, no cloud provisioning)
+- kubectl-only interface (no CLI, no REST API)
+- Focus on deep K8s operator patterns over feature breadth
+- 1-2 month timeline to complete remaining 7 milestones
+- Each milestone chosen for maximum learning value
 
 ## Known Issues
-None yet.
+- KubernetesProvider not yet wired into controller (M6)
 
 ## Notes
-- Focus heavily on learning K8s operator patterns
+- Primary goal: Learn Kubernetes and cloud-native patterns deeply
+- Focus on operator internals, not building commodity features
 - Every implementation needs comprehensive WHY/HOW comments
 - Compare with real platforms throughout
-- Use Serena MCP tools for efficient code navigation
-- Target K8s 1.33+ to avoid extended support costs

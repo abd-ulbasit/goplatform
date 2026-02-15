@@ -1,48 +1,39 @@
 # Active Context
 
 ## Current Focus
-Pre-Milestone 1 planning complete. Ready to begin kubebuilder project initialization.
+Scope revision complete. Ready to begin Milestone 6 (End-to-End Integration).
 
 ## Next Steps
-1. Initialize kubebuilder project with domain `platform.goplatform.io`
-2. Scaffold Application CRD v1alpha1
-3. Design cloud-agnostic CRD schema
-4. Set up local Kubernetes with Colima
-5. Implement validation webhooks
+1. Wire KubernetesProvider into controller reconciliation flow
+2. Implement status mapping from provider → ApplicationStatus conditions
+3. Set up Kind cluster with CNPG/Redis/RabbitMQ operators for real testing
+4. Validate full create → status → delete lifecycle on real cluster
 
-## Recent Changes (Session 2)
-- Designed credential flow (Terraform → K8s Secrets → Application)
-- Designed InfrastructureProvider adapter pattern for cloud abstraction
-- Evaluated RBAC (K8s RBAC + policies first, platform-level later)
-- Added unique features: Cost Estimation, Preview Environments, Drift Detection
-- Expanded PROGRESS.md with all 35 milestones across 8 phases
-- Added development.instructions.md for Serena and local K8s
-- Cleaned up README.md with competitive differentiators
+## Recent Changes (Session 4)
+- Revised project scope from 36 milestones to 12
+- Dropped Terraform, REST API, CLI, Service Catalog, Preview Environments
+- Focused roadmap on K8s operator depth: webhooks, observability, drift detection, multi-version CRDs, policy, E2E
+- Fixed milestone tracking inconsistencies
+- Updated all documentation to reflect new scope
 
 ## Active Decisions
 
-### Made Decisions (Session 2)
-1. **Cloud Abstraction** - Use InfrastructureProvider interface pattern (simpler than Crossplane XRDs)
-2. **Credential Passing** - K8s Secrets (simple) + External Secrets Operator (production)
-3. **RBAC Approach** - K8s RBAC + Kyverno policies first, add platform-level RBAC in Phase 8
-4. **State Backend** - S3 + DynamoDB locking
-5. **Local Kubernetes** - Colima with K8s 1.33+ (avoid extended support costs)
-6. **Terraform Execution** - Subprocess (exec.Cmd) for isolation
+### Made Decisions
+1. **Cloud Abstraction** - InfrastructureProvider interface pattern
+2. **Infrastructure** - Kubernetes-only (CNPG, Redis, RabbitMQ operators). No Terraform.
+3. **Developer Interface** - kubectl only. No CLI or REST API.
+4. **Credential Passing** - K8s Secrets (simple, works everywhere)
+5. **Policy Engine** - Kyverno integration (don't reinvent)
+6. **Local Kubernetes** - Kind (testing) + Colima (dev)
 
-### Pending Decisions
-1. **kubebuilder vs operator-sdk** - Leaning kubebuilder (simpler, widely used)
-2. **CLI Framework** - cobra + viper (standard Go CLI stack)
-
-## Current Session Goals
-- Begin Milestone 1: kubebuilder project setup
-- Scaffold Application CRD
-- Set up local development environment
+### No Pending Decisions
+All major architectural decisions resolved during scope revision.
 
 ## Blockers
 None currently.
 
 ## Notes
-- Focus on learning Kubernetes operator patterns deeply
-- Every implementation should have comprehensive comments explaining WHY and HOW
-- Compare approaches with real platforms (Backstage, Crossplane)
-- Use Serena MCP tools for efficient code navigation
+- Primary goal: Learn Kubernetes deeply by building operators
+- Timeline: 1-2 months for remaining 7 milestones (M6-M12)
+- Each milestone chosen for maximum K8s learning value
+- Validate on real clusters, not just envtest

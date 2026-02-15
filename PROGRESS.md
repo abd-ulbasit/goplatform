@@ -1,10 +1,10 @@
 # GoPlatform Development Progress
 
-## Status: Phase 2 - Infrastructure Providers
+## Status: Phase 2 - Real-World Operator
 
-**Target Milestones**: 36  
-**Completed**: 4  
-**Current**: Milestone 6 Complete - Ready for Milestone 7
+**Target Milestones**: 12
+**Completed**: 5
+**Current**: Ready for Milestone 6
 
 ---
 
@@ -12,49 +12,48 @@
 
 | Phase | Description | Milestones | Status |
 |-------|-------------|------------|--------|
-| Phase 1 | Operator Foundation | M1-M5 | ✅ Complete |
-| Phase 2 | Infrastructure Providers | M6-M13 | 🔄 In Progress |
-| Phase 3 | Credential Management | M14-M16 | 📋 Planned |
-| Phase 4 | Platform API & CLI | M17-M20 | 📋 Planned |
-| Phase 5 | Observability | M21-M24 | 📋 Planned |
-| Phase 6 | Service Catalog | M25-M28 | 📋 Planned |
-| Phase 7 | Developer Experience | M29-M32 | 📋 Planned |
-| Phase 8 | Production Hardening | M33-M36 | 📋 Planned |
+| Phase 1 | Solid Foundation | M1-M5 | ✅ Complete |
+| Phase 2 | Real-World Operator | M6-M9 | 🔄 In Progress |
+| Phase 3 | Advanced Patterns | M10-M12 | 📋 Planned |
 
 ---
 
-## Unique Platform Features (Competitive Differentiators)
+## Learning Progression
 
-These features distinguish GoPlatform from Backstage, Crossplane, and Terraform Cloud:
+Each milestone builds on the previous, taking you from "basic operator" to "production-grade operator expertise":
 
-| Feature | Phase | Description | Why It Matters |
-|---------|-------|-------------|----------------|
-| **Cost Estimation** | M18 | Show monthly cost before provisioning | No billing surprises |
-| **Preview Environments** | M30 | Auto-create full stack for each PR | DX game-changer |
-| **Environment Promotion** | M29 | Promote config dev→staging→prod | Golden path |
-| **Drift Detection** | M32 | Detect when infra diverges from CRD | Self-healing |
-| **Dependency Graph** | M26 | Visual service dependency graph | Impact awareness |
-| **Team Budgets** | M34 | Cost controls per team | FinOps built-in |
-| **Secrets Rotation** | M16 | Auto-rotate database passwords | Security by default |
-| **Local Development** | M31 | Run same stack locally | True parity |
-| **Audit Trail** | M35 | Who provisioned what, when | Compliance |
-| **Resource Templates** | M28 | Pre-built blueprints | Faster onboarding |
+```
+M1-M5: "I can write a basic operator"
+  ↓
+M6: "I can make it work with real infrastructure"
+  ↓
+M7: "I can intercept and validate API requests"
+  ↓
+M8: "I can integrate with the monitoring ecosystem"
+  ↓
+M9: "I understand deep reconciliation patterns"
+  ↓
+M10: "I can evolve APIs without breaking users"
+  ↓
+M11: "I can integrate with the policy ecosystem"
+  ↓
+M12: "I can ship a production-grade operator"
+```
 
 ---
 
-## Phase 1: Operator Foundation
+## Phase 1: Solid Foundation
 
 ### Milestone 1: Project Setup & CRD Design - ✅ COMPLETED
 
 **Goal:** Set up the operator project structure and design the core Application CRD.
 
-**Learning Focus:**
+**What You Learned:**
 - How kubebuilder scaffolds operators
 - CRD schema design with OpenAPI validation
 - Why structural schemas matter for Kubernetes
-- Admission webhooks for complex validation
 
-**Concepts to Understand:**
+**Concepts:**
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         KUBEBUILDER PROJECT STRUCTURE                       │
@@ -83,14 +82,11 @@ These features distinguish GoPlatform from Backstage, Crossplane, and Terraform 
 ```
 
 **Deliverables:**
-- [ ] kubebuilder project initialization with domain `platform.goplatform.io`
-- [ ] Application CRD v1alpha1 type definitions
-- [ ] OpenAPI structural schema with validations
-- [ ] Validation webhook for complex cross-field validation
-- [ ] Defaulting webhook for sensible defaults
-- [ ] Generated CRD YAML and RBAC manifests
-- [ ] Basic unit tests for type conversions
-- [ ] Helm chart for CRD installation
+- [x] kubebuilder project initialization with domain `platform.goplatform.io`
+- [x] Application CRD v1alpha1 type definitions
+- [x] OpenAPI structural schema with validations
+- [x] Generated CRD YAML and RBAC manifests
+- [x] Helm chart for CRD installation
 
 **CRD Design (Cloud-Agnostic):**
 ```yaml
@@ -98,153 +94,44 @@ apiVersion: platform.goplatform.io/v1alpha1
 kind: Application
 metadata:
   name: payments-api
-  namespace: default
 spec:
-  # ============================================================
-  # OWNERSHIP - who owns this service
-  # ============================================================
   team: payments
   owner: alice@company.com
-  tier: critical  # critical/standard/development → affects SLAs
+  tier: critical  # critical/standard/development
 
-  # ============================================================
-  # WORKLOAD - what to deploy
-  # ============================================================
   workload:
     image: ghcr.io/company/payments-api:v1.0.0
     replicas: 3
-    resources:
-      requests:
-        cpu: 500m
-        memory: 512Mi
-      limits:
-        cpu: 1
-        memory: 1Gi
-    ports:
-      - name: http
-        containerPort: 8080
-      - name: metrics
-        containerPort: 9090
-    healthCheck:
-      path: /health
-      port: 8080
-    
-  # ============================================================
-  # SCALING - how to scale
-  # ============================================================
-  scaling:
-    minReplicas: 2
-    maxReplicas: 10
-    metrics:
-      - type: cpu
-        target: 70
-      - type: memory
-        target: 80
-  
-  # ============================================================
-  # INFRASTRUCTURE - cloud-agnostic resource requests
-  # ============================================================
-  # The platform maps these to provider-specific resources
-  # (AWS RDS, GCP Cloud SQL, local CloudNativePG, etc.)
-  
+
+  # Cloud-agnostic infrastructure requests
   database:
-    type: postgres               # postgres, mysql
-    size: small                  # small/medium/large → platform interprets
-    version: "15"                # Major version only
-    highAvailability: true       # Multi-AZ/replicas
-    backup:
-      enabled: true
-      retentionDays: 7
-      window: "03:00-04:00"
-    
-  cache:
-    type: redis                  # redis, memcached
-    size: small
+    type: postgres
+    size: small      # small/medium/large → provider maps to specific sizes
     highAvailability: true
-    
+
+  cache:
+    type: redis
+    size: small
+
   queue:
-    type: sqs                    # sqs, rabbitmq, kafka
-    fifo: false
+    type: rabbitmq
     deadLetterQueue:
       enabled: true
-      maxReceiveCount: 5
-  
+
   storage:
-    type: s3                     # s3, gcs
-    versioning: true
-    encryption: true
-  
-  # ============================================================
-  # OBSERVABILITY - monitoring configuration
-  # ============================================================
-  observability:
-    metrics:
-      enabled: true
-      path: /metrics
-      port: 9090
-    tracing:
-      enabled: true
-      sampleRate: 0.1
-    logging:
-      format: json               # json, logfmt
-  
-  # ============================================================
-  # DEPENDENCIES - what this service depends on
-  # ============================================================
-  dependencies:
-    - name: orders-api           # Service name
-      namespace: default         # Optional, defaults to same namespace
-      required: true             # Block startup if unavailable
-    - name: notification-svc
-      required: false
+    type: pvc
+    size: 10Gi
 
 status:
   phase: Ready  # Pending/Provisioning/Ready/Failed/Deleting
-  observedGeneration: 1
-  
   conditions:
     - type: Ready
       status: "True"
-      reason: AllResourcesProvisioned
-      message: "All resources are ready"
-      lastTransitionTime: "2025-02-09T10:00:00Z"
-    - type: WorkloadReady
-      status: "True"
-    - type: DatabaseReady  
+    - type: DatabaseReady
       status: "True"
     - type: CacheReady
       status: "True"
-  
-  # Infrastructure endpoints (populated after provisioning)
-  infrastructure:
-    database:
-      endpoint: payments-api-db.xxx.us-east-1.rds.amazonaws.com
-      port: 5432
-      secretRef: 
-        name: payments-api-database-credentials
-    cache:
-      endpoint: payments-api-cache.xxx.cache.amazonaws.com
-      port: 6379
-    queue:
-      url: https://sqs.us-east-1.amazonaws.com/123456789/payments-api-queue
-      arn: arn:aws:sqs:us-east-1:123456789:payments-api-queue
-  
-  # Cost estimation
-  estimatedMonthlyCost:
-    amount: "245.50"
-    currency: USD
-    breakdown:
-      database: "180.00"
-      cache: "45.50"
-      queue: "20.00"
 ```
-
-**Key Patterns:**
-- Cloud-agnostic spec (no AWS-specific fields)
-- Size abstraction (small/medium/large → provider maps to instance types)
-- Status reports infrastructure endpoints
-- Owner references for garbage collection
-- Conditions for fine-grained status
 
 ---
 
@@ -252,78 +139,50 @@ status:
 
 **Goal:** Implement the core reconciliation loop that watches Applications and creates Kubernetes resources.
 
-**Learning Focus:**
+**What You Learned:**
 - Controller-runtime architecture (informers, work queues)
 - Reconciliation pattern (level-triggered vs edge-triggered)
 - Idempotent operations
 - Error handling and requeueing
 
-**Concepts to Understand:**
+**Concepts:**
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                      KUBERNETES CONTROLLER ARCHITECTURE                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                             INFORMER                                    ││
-│  │  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐            ││
-│  │  │   Reflector   │───►│   DeltaFIFO   │───►│   Indexer     │            ││
-│  │  │               │    │   (queue)     │    │   (cache)     │            ││
-│  │  │ - List+Watch  │    │ - Add/Update  │    │ - Local copy  │            ││
-│  │  │ - From API    │    │   /Delete     │    │   of objects  │            ││
-│  │  │   server      │    │ - Sync        │    │               │            ││
-│  │  └───────────────┘    └───────┬───────┘    └───────────────┘            ││
-│  │                                │                     ▲                  ││
-│  │                                │  events             │ read cache       ││
-│  │                                ▼                     │                  ││
-│  │                       ┌───────────────┐              │                  ││
-│  │                       │   Handler     │──────────────┘                  ││
-│  │                       │ (filter/map)  │                                 ││
-│  │                       └───────┬───────┘                                 ││
-│  │                                │                                        ││
-│  └────────────────────────────────┼────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                             INFORMER                                  │  │
+│  │  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐          │  │
+│  │  │   Reflector   │───►│   DeltaFIFO   │───►│   Indexer     │          │  │
+│  │  │ - List+Watch  │    │ - Add/Update  │    │ - Local cache │          │  │
+│  │  │ - From API    │    │   /Delete     │    │   of objects  │          │  │
+│  │  └───────────────┘    └───────┬───────┘    └───────────────┘          │  │
+│  │                                │  events             ▲ read cache     │  │
+│  │                                ▼                     │                │  │
+│  │                       ┌───────────────┐              │                │  │
+│  │                       │   Handler     │──────────────┘                │  │
+│  │                       └───────┬───────┘                               │  │
+│  └────────────────────────────────┼──────────────────────────────────────┘  │
 │                                   ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                           WORK QUEUE                                    ││
-│  │                                                                         ││
-│  │  Features:                                                              ││
-│  │  - Rate limiting (prevents hammering API)                               ││
-│  │  - Exponential backoff (on errors)                                      ││
-│  │  - Deduplication (multiple events → one reconcile)                      ││
-│  │  - Fair queuing (no object starves)                                     ││
-│  │                                                                         ││
-│  │  ┌─────┬─────┬─────┬─────┬─────┐                                        ││
-│  │  │ A/1 │ B/2 │ C/1 │ A/1 │ D/5 │ ──► deduped to [A/1, B/2, C/1, D/5]    ││
-│  │  └─────┴─────┴─────┴─────┴─────┘                                        ││
-│  │                                                                         ││
-│  └─────────────────────────────────┬───────────────────────────────────────┘│
-│                                    │                                        │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                           WORK QUEUE                                  │  │
+│  │  - Rate limiting, exponential backoff, deduplication, fair queuing    │  │
+│  └─────────────────────────────────┬─────────────────────────────────────┘  │
 │                                    ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                           RECONCILER                                    ││
-│  │                                                                         ││
-│  │  Reconcile(ctx, Request{Name, Namespace})                               ││
-│  │    │                                                                    ││
-│  │    ├─► Get current state (from cache)                                   ││
-│  │    │                                                                    ││
-│  │    ├─► Compare to desired state (spec)                                  ││
-│  │    │                                                                    ││
-│  │    ├─► Take action (create/update/delete resources)                     ││
-│  │    │                                                                    ││
-│  │    ├─► Update status                                                    ││
-│  │    │                                                                    ││
-│  │    └─► Return Result                                                    ││
-│  │          - Result{} = done, don't requeue                               ││
-│  │          - Result{Requeue: true} = requeue immediately                  ││
-│  │          - Result{RequeueAfter: 5m} = requeue in 5 minutes              ││
-│  │          - error = requeue with backoff                                 ││
-│  │                                                                         ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                           RECONCILER                                  │  │
+│  │  Reconcile(ctx, Request{Name, Namespace})                             │  │
+│  │    ├─► Get current state (from cache)                                 │  │
+│  │    ├─► Compare to desired state (spec)                                │  │
+│  │    ├─► Take action (create/update/delete)                             │  │
+│  │    ├─► Update status                                                  │  │
+│  │    └─► Return Result (done / requeue / requeue after / error)         │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
 │  WHY LEVEL-TRIGGERED (not edge-triggered):                                  │
-│  - Edge: "Something changed" → might miss events, need complex logic        │
-│  - Level: "Make actual = desired" → idempotent, self-healing                │
-│  - If reconcile fails, just retry - eventual consistency                    │
+│  - Edge: "Something changed" → might miss events                           │
+│  - Level: "Make actual = desired" → idempotent, self-healing               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -338,14 +197,6 @@ status:
 - [x] Proper structured logging (controller-runtime log)
 - [x] Error handling with requeue strategies
 - [x] Unit tests with envtest (66.9% coverage)
-- [ ] Integration tests with local cluster (deferred to later)
-
-**Key Patterns Implemented:**
-- Reconciler is idempotent (running twice = same result)
-- Level-triggered reconciliation (compare and sync, not event-driven)
-- Finalizer pattern for cleanup before deletion
-- Owner references for garbage collection
-- Status conditions for granular readiness reporting
 
 ---
 
@@ -353,52 +204,11 @@ status:
 
 **Goal:** Generate all necessary Kubernetes resources from Application spec.
 
-**Learning Focus:**
+**What You Learned:**
 - Building K8s resources programmatically with Go client types
 - Owner references for garbage collection
 - ConfigMap and Secret generation patterns
 - HPA and PDB for production readiness
-
-**Concepts to Understand:**
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         OWNER REFERENCES & GARBAGE COLLECTION               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  WHY: When Application is deleted, we want all created resources to be      │
-│  automatically cleaned up. Kubernetes has built-in support for this via     │
-│  owner references + garbage collector.                                      │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                        Application: payments-api                        ││
-│  │                      (owner, controller: true)                          ││
-│  │                                │                                        ││
-│  │           ┌────────────────────┼────────────────────┐                   ││
-│  │           ▼                    ▼                    ▼                   ││
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐          ││
-│  │  │   Deployment    │  │    Service      │  │   ConfigMap     │          ││
-│  │  │  payments-api   │  │  payments-api   │  │  payments-api   │          ││
-│  │  │                 │  │                 │  │                 │          ││
-│  │  │ ownerReferences:│  │ ownerReferences:│  │ ownerReferences:│          ││
-│  │  │ - kind: App     │  │ - kind: App     │  │ - kind: App     │          ││
-│  │  │   name: pay-api │  │   name: pay-api │  │   name: pay-api │          ││
-│  │  │   controller: ✓ │  │                 │  │                 │          ││
-│  │  └─────────────────┘  └─────────────────┘  └─────────────────┘          ││
-│  │                                                                         ││
-│  │  DELETION MODES:                                                        ││
-│  │  - Foreground: Children deleted first, then owner (blocks)              ││
-│  │  - Background: Owner deleted, children cleaned async (default)          ││
-│  │  - Orphan: Owner deleted, children remain                               ││
-│  │                                                                         ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                             │
-│  CONTROLLER FLAG:                                                           │
-│  - Only ONE owner can have controller: true                                 │
-│  - Controller gets precedence in conflict resolution                        │
-│  - Used for determining "primary" owner                                     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
 
 **Deliverables:**
 - [x] Deployment generation with pod spec from Application
@@ -410,797 +220,615 @@ status:
 - [x] Owner references on all created resources
 - [x] Resource update logic (handle spec changes)
 - [x] Unit tests for resource generation
-- [x] Test garbage collection on Application delete
 
 ---
 
-### Milestone 4: Status Management & Conditions - NOT STARTED
+### Milestone 4: Status Conditions & Finalizers - ✅ COMPLETED
 
-**Goal:** Implement proper status reporting with conditions following Kubernetes conventions.
+**Goal:** Implement status reporting with conditions following K8s conventions, and safe deletion with finalizers.
 
-**Learning Focus:**
+*(Previously milestones 4, 5, 6 in the old plan. Consolidated because all were implemented together.)*
+
+**What You Learned:**
 - Status subresource pattern (spec vs status)
-- Kubernetes conditions convention
-- Observability through status
-- Status update patterns (avoid conflicts)
-
-**Concepts to Understand:**
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         KUBERNETES CONDITIONS PATTERN                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  WHY CONDITIONS:                                                            │
-│  - Single `phase` field is too limited                                      │
-│  - Can't express "DB provisioning but cache failed"                         │
-│  - Conditions allow independent status for each concern                     │
-│                                                                             │
-│  CONDITION STRUCTURE:                                                       │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │  conditions:                                                            ││
-│  │    - type: Ready           # The overall readiness                      ││
-│  │      status: "False"       # True, False, Unknown                       ││
-│  │      reason: DatabaseFailed # CamelCase, machine-readable               ││
-│  │      message: "RDS instance failed to provision: QUOTA_EXCEEDED"        ││
-│  │      lastTransitionTime: "2025-02-09T10:00:00Z"                         ││
-│  │      observedGeneration: 5  # Which spec generation this reflects       ││
-│  │                                                                         ││
-│  │    - type: WorkloadReady                                                ││
-│  │      status: "True"                                                     ││
-│  │      reason: DeploymentAvailable                                        ││
-│  │                                                                         ││
-│  │    - type: DatabaseReady                                                ││
-│  │      status: "False"                                                    ││
-│  │      reason: Provisioning                                               ││
-│  │      message: "RDS instance is starting up..."                          ││
-│  │                                                                         ││
-│  │    - type: CacheReady                                                   ││
-│  │      status: "True"                                                     ││
-│  │      reason: ElastiCacheAvailable                                       ││
-│  │                                                                         ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                             │
-│  CONVENTIONS:                                                               │
-│  - "Ready" = overall status (True only if all components ready)             │
-│  - Use positive polarity (Ready, not NotReady)                              │
-│  - Reason = why this status (short, CamelCase)                              │
-│  - Message = human-readable details                                         │
-│  - Update lastTransitionTime only on status change                          │
-│  - observedGeneration = which spec version status reflects                  │
-│                                                                             │
-│  ANTI-PATTERNS:                                                             │
-│  ✗ Updating status on every reconcile (causes watch storms)                 │
-│  ✗ Losing lastTransitionTime (resets every reconcile)                       │
-│  ✗ Using phase field alone (can't express partial states)                   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+- Kubernetes conditions convention (positive polarity, observed generation)
+- Finalizer pattern for blocking deletion until cleanup is complete
+- `retry.RetryOnConflict` for status updates
+- Event recording for operational visibility
 
 **Deliverables:**
-- [ ] Status subresource in CRD definition (marker: `+kubebuilder:subresource:status`)
-- [ ] Condition types: Ready, WorkloadReady, DatabaseReady, CacheReady, QueueReady
-- [ ] Condition helper functions (SetCondition, GetCondition, IsReady)
-- [ ] Phase field: Pending/Provisioning/Ready/Failed/Deleting
-- [ ] Infrastructure status (endpoints, ports, secrets)
-- [ ] ObservedGeneration tracking
-- [ ] Event recording for key state transitions
-- [ ] Status update conflict handling (retry on conflict)
-- [ ] Tests for condition transitions
+- [x] Status subresource with `+kubebuilder:subresource:status`
+- [x] Condition types: Ready, WorkloadReady, DatabaseReady, CacheReady, QueueReady
+- [x] Condition helper functions (SetCondition, GetCondition, IsReady) in `conditions.go`
+- [x] Phase field: Pending/Provisioning/Ready/Failed/Deleting
+- [x] Finalizer `platform.goplatform.io/finalizer` on create
+- [x] Deletion detection via `DeletionTimestamp != nil`
+- [x] Infrastructure cleanup before finalizer removal
+- [x] Deletion grace period (30 minutes)
+- [x] Event recording for key state transitions
+- [x] Tests for condition transitions and cleanup
 
 ---
 
-### Milestone 5: Finalizers & Cleanup - NOT STARTED
+### Milestone 5: Provider Interface & Kubernetes Provider - ✅ COMPLETED
 
-**Goal:** Implement safe deletion with finalizers to prevent orphaned resources.
+**Goal:** Design the pluggable provider abstraction and implement Kubernetes-native provisioning.
 
-**Learning Focus:**
-- Finalizer pattern and mechanics
-- Deletion workflow in Kubernetes
-- Preventing orphaned cloud resources
-- Graceful cleanup order
+*(Previously milestones 6, 7 in the old plan. Consolidated because they form one logical unit.)*
 
-**Concepts to Understand:**
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              FINALIZER PATTERN                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  WHY FINALIZERS:                                                            │
-│  When user runs `kubectl delete application payments-api`:                  │
-│  - K8s wants to delete the object immediately                               │
-│  - But we have AWS resources (RDS, ElastiCache) to clean up                 │
-│  - Finalizers BLOCK deletion until we're done with cleanup                  │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                          DELETION FLOW                                  ││
-│  │                                                                         ││
-│  │  1. Application Created                                                 ││
-│  │     ┌─────────────────────────────────────────────────────────────┐     ││
-│  │     │ metadata:                                                   │     ││
-│  │     │   finalizers:                                               │     ││
-│  │     │   - platform.goplatform.io/cleanup  ◄── Added by controller │     ││
-│  │     │   deletionTimestamp: null                                   │     ││
-│  │     └─────────────────────────────────────────────────────────────┘     ││
-│  │                                │                                        ││
-│  │                                ▼                                        ││
-│  │  2. User Deletes: kubectl delete application payments-api               ││
-│  │     ┌─────────────────────────────────────────────────────────────┐     ││
-│  │     │ metadata:                                                   │     ││
-│  │     │   finalizers:                                               │     ││
-│  │     │   - platform.goplatform.io/cleanup  ◄── Still present       │     ││
-│  │     │   deletionTimestamp: 2025-02-09T10:00:00Z ◄── K8s marks     │     ││
-│  │     └─────────────────────────────────────────────────────────────┘     ││
-│  │     Object is NOT deleted yet! User sees "Terminating"                  ││
-│  │                                │                                        ││
-│  │                                ▼                                        ││
-│  │  3. Controller Reconciles (sees deletionTimestamp != nil)               ││
-│  │     - Run `terraform destroy` for AWS resources                         ││
-│  │     - Wait for destruction to complete                                  ││
-│  │     - Remove finalizer from metadata.finalizers                         ││
-│  │                                │                                        ││
-│  │                                ▼                                        ││
-│  │  4. Finalizer Removed                                                   ││
-│  │     ┌─────────────────────────────────────────────────────────────┐     ││
-│  │     │ metadata:                                                   │     ││
-│  │     │   finalizers: []  ◄── Empty now                             │     ││
-│  │     │   deletionTimestamp: 2025-02-09T10:00:00Z                   │     ││
-│  │     └─────────────────────────────────────────────────────────────┘     ││
-│  │                                │                                        ││
-│  │                                ▼                                        ││
-│  │  5. K8s Garbage Collector sees no finalizers → Object deleted           ││
-│  │                                                                         ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│                                                                             │
-│  EDGE CASES:                                                                │
-│  - Terraform destroy fails → Keep retrying, object stuck in Terminating     │
-│  - Controller crashes mid-cleanup → On restart, sees deletionTimestamp,     │
-│    continues cleanup from where it left off                                 │
-│  - Force delete with --force --grace-period=0 → Still waits for finalizer!  │
-│  - To truly force: kubectl patch -p '{"metadata":{"finalizers":null}}'      │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Deliverables:**
-- [ ] Add finalizer on Application create/update
-- [ ] Detect deletion via `DeletionTimestamp != nil`
-- [ ] Cleanup infrastructure (prepare for Terraform destroy in M8)
-- [ ] Remove finalizer after successful cleanup
-- [ ] Update status to Deleting phase during cleanup
-- [ ] Handle cleanup failures (retry, don't remove finalizer)
-- [ ] Event recording for cleanup stages
-- [ ] Tests for normal deletion flow
-- [ ] Tests for cleanup failure scenarios
-- [ ] Document manual intervention for stuck resources
-
----
-
-## Phase 2: Infrastructure Providers
-
-### Milestone 6: Provider Interface & Factory - ✅ COMPLETED
-
-**Goal:** Design the adapter pattern for infrastructure provisioning.
-
-**Learning Focus:**
-- Go interfaces for abstraction
+**What You Learned:**
+- Go interface design for abstraction
 - Factory pattern for provider selection
-- Configuration-driven provider instantiation
-- Strategy pattern for different clouds
+- Strategy pattern for different infrastructure backends
+- Working with third-party operator CRDs (CNPG, Redis, RabbitMQ)
+- CRD discovery and validation
+- Typed error systems in Go
 
 **Deliverables:**
-- [x] InfrastructureProvider interface definition
-- [x] ProviderConfig struct for platform configuration
-- [x] ProviderFactory to instantiate correct provider
-- [x] Provider selection from config (aws/gcp/kubernetes/local/mock)
-- [x] Mock provider for testing
-- [x] Provider lifecycle management
-- [x] Error types for infrastructure failures
-- [x] Unit tests with mock provider (32 tests passing)
-
-**Completed Files:**
-- `internal/provider/doc.go` - Package documentation
-- `internal/provider/types.go` - ResourceState, DatabaseState, CacheState, QueueState, StorageState, ProviderConfig, AWSConfig, GCPConfig, KubernetesConfig, LocalConfig
-- `internal/provider/errors.go` - NotReadyError, NotFoundError, QuotaExceededError, InvalidConfigError, ProvisioningError, TimeoutError, AuthenticationError, ProviderNotConfiguredError
-- `internal/provider/interface.go` - InfrastructureProvider interface + optional CostEstimator, DriftDetector interfaces
-- `internal/provider/factory.go` - Factory struct with RegisterProvider, GetProvider, SetConfig, SetProvider, Reset
-- `internal/provider/mock.go` - MockProvider with full lifecycle simulation, delay support, error injection, invocation tracking
-- `internal/provider/provider_test.go` - Comprehensive test suite
+- [x] `InfrastructureProvider` interface (`Provision`, `GetStatus`, `Destroy`, `Healthy`)
+- [x] Optional capability interfaces: `CostEstimator`, `DriftDetector`, `StateManager`
+- [x] `ProviderFactory` with registration and instantiation
+- [x] Typed error system: `NotReadyError`, `NotFoundError`, `QuotaExceededError`, `InvalidConfigError`, `ProvisioningError`, `TimeoutError`, `AuthenticationError`
+- [x] `MockProvider` with lifecycle simulation, delay support, error injection, invocation tracking
+- [x] `KubernetesProvider` implementation:
+  - CloudNativePG Cluster CRD for PostgreSQL
+  - Spotahome RedisFailover CRD for Redis
+  - RabbitMQ Cluster Operator CRD for queues
+  - PVC-based storage provisioning
+- [x] Operator CRD discovery checks with clear error messages
+- [x] Credential Secrets with connection strings per resource type
+- [x] Cleanup logic for spec removal and full `Destroy()`
+- [x] Unit tests: 32 provider tests + Kubernetes provider tests (fake client + discovery)
 
 ---
 
-### Milestone 7: Kubernetes Provider (In-Cluster) - NOT STARTED
+## Phase 2: Real-World Operator
 
-**Goal:** Implement the Kubernetes-native provider that provisions infrastructure inside the cluster.
+### Milestone 6: End-to-End Integration - NOT STARTED
 
-**Learning Focus:**
-- Kubernetes operators and CRDs (CloudNativePG, Redis, RabbitMQ, etc.)
-- StatefulSets vs operator-managed databases
-- PVC lifecycle and storage classes
-- Secret generation and service discovery
-- Readiness/health checks for operator resources
+**Goal:** Wire the KubernetesProvider into the controller and validate the full lifecycle on a real cluster with real operators.
+
+**Why This Milestone Matters:**
+Everything built so far has been tested with envtest (mock API server) or fake clients. This milestone bridges the gap to reality. You'll discover bugs that only appear when real operators are processing your CRDs — timing issues, RBAC gaps, CRD version mismatches, and status propagation delays that envtest can't simulate.
+
+**What You'll Learn:**
+- How operators interact in a real cluster (your operator → CNPG operator → actual PostgreSQL pod)
+- The difference between envtest and real reconciliation behavior
+- RBAC debugging (why your controller can't create CNPG Clusters)
+- How to observe your operator's behavior with `kubectl`, logs, and events
+- Status propagation: waiting for child resources to become ready
+
+**How to Build It:**
+
+1. **Controller ↔ Provider Wiring**
+   - Modify `ApplicationReconciler.Reconcile()` to call `provider.Provision()` for infrastructure resources
+   - Map `ResourceState` from the provider back to `ApplicationStatus` conditions
+   - Handle the provider returning `NotReady` (requeue) vs `Ready` (continue) vs error (fail)
+   - Ensure the reconcile loop handles partial provisioning (database ready, cache still provisioning)
+
+2. **Status Mapping Pipeline**
+   ```
+   KubernetesProvider.GetStatus()
+     → ResourceState{Database: {Phase: Ready}, Cache: {Phase: Provisioning}}
+       → Controller maps to conditions:
+         DatabaseReady = True
+         CacheReady = False (reason: Provisioning)
+         Ready = False (reason: InfrastructureNotReady)
+   ```
+
+3. **Real Cluster Validation**
+   - Create a Kind cluster with CNPG operator, Redis operator, and RabbitMQ operator installed
+   - Deploy the goplatform controller
+   - Apply an Application CR with database + cache + queue specs
+   - Verify: CNPG Cluster CR created → PostgreSQL pod running → credentials Secret exists
+   - Verify: RedisFailover CR created → Redis pod running → credentials Secret exists
+   - Verify: RabbitmqCluster CR created → RabbitMQ pod running → credentials Secret exists
+   - Verify: Application status shows all conditions Ready
+   - Delete the Application and verify all child resources are cleaned up
+
+4. **RBAC Configuration**
+   - Add kubebuilder RBAC markers for CNPG, Redis, RabbitMQ CRDs
+   - Add RBAC for Secrets, PVCs created by the provider
+   - Run `make manifests` to regenerate role.yaml
+   - Test that controller can create/read/delete all required resources
+
+5. **Error Handling & Edge Cases**
+   - Operator not installed (CRD doesn't exist) → clear error condition, don't crash
+   - Operator installed but resource creation fails → condition with error message
+   - Partial failure (database succeeds, cache fails) → accurate per-resource conditions
+   - Application deleted while infrastructure is still provisioning → graceful cleanup
 
 **Deliverables:**
-- [ ] KubernetesProvider implementation (implements InfrastructureProvider)
-- [ ] In-cluster PostgreSQL (CloudNativePG or StatefulSet fallback)
-- [ ] In-cluster Redis (Bitnami/Operator)
-- [ ] In-cluster queue (RabbitMQ/NATS)
-- [ ] PVC-based storage provisioning
-- [ ] Operator presence detection and clear error messages
-- [ ] Secrets with credentials + connection strings
-- [ ] Status mapping to ResourceState (ready/provisioning/failed)
-- [ ] Cleanup on spec removal (delete CRs/PVCs)
-- [ ] Unit tests for provider logic (mocked K8s client)
-- [ ] Envtest integration tests for CR creation
+- [ ] Controller calls `provider.Provision()` during reconciliation
+- [ ] Controller calls `provider.GetStatus()` and maps to Application conditions
+- [ ] Controller calls `provider.Destroy()` during finalizer cleanup
+- [ ] RBAC markers for all third-party CRDs (CNPG, Redis, RabbitMQ)
+- [ ] Kind cluster setup script with operator installations
+- [ ] Manual end-to-end test: create Application → verify all resources → delete → verify cleanup
+- [ ] Envtest integration tests for the controller ↔ provider flow
+- [ ] Documentation: how to set up a dev cluster for testing
 
 ---
 
-### Milestone 8: Terraform Runner - NOT STARTED
+### Milestone 7: Admission Webhooks - NOT STARTED
 
-**Goal:** Execute Terraform from within the controller for AWS resource provisioning.
+**Goal:** Add validating and mutating admission webhooks to intercept Application CRDs before they hit etcd.
 
-**Learning Focus:**
-- Calling external processes from Go (os/exec)
-- Terraform CLI workflow (init/plan/apply/destroy)
-- Parsing Terraform JSON output
-- Working directory and file management
-- Process timeouts and cancellation
+**Why This Milestone Matters:**
+Webhooks are how Kubernetes enforces rules at the API level — before objects are stored. Every production operator uses them. Validating webhooks reject invalid resources (preventing bad state from ever existing), and mutating webhooks inject defaults or modify resources transparently. This is fundamental to understanding how K8s extensibility works.
+
+**What You'll Learn:**
+- How the K8s API server calls webhooks during admission (the admission chain)
+- cert-manager integration for webhook TLS certificates
+- The difference between CRD validation markers and webhook validation (when to use which)
+- Mutating webhooks: injecting defaults, adding labels, setting annotations
+- Webhook failure policies: `Fail` vs `Ignore` and their implications
+- Testing webhooks with envtest (which supports webhooks natively)
+
+**How to Build It:**
+
+1. **Scaffold with kubebuilder**
+   ```bash
+   kubebuilder create webhook --group platform --version v1alpha1 --kind Application \
+     --defaulting --programmatic-validation
+   ```
+   This generates the webhook files and wires them into the manager.
+
+2. **Validating Webhook** (`application_webhook.go` → `ValidateCreate`, `ValidateUpdate`, `ValidateDelete`)
+   - Cross-field validation that CRD markers can't express:
+     - If `tier: critical` → `highAvailability` must be true for database and cache
+     - If `database.type: postgres` → `database.version` must be a valid PostgreSQL major version (13-17)
+     - `queue.type` must match a supported type for the active provider
+     - Resource names must be valid DNS subdomain names
+   - Update validation:
+     - Prevent changing `database.type` after creation (e.g., postgres → mysql is destructive)
+     - Prevent changing `tier` from `critical` to `development` without explicit annotation override
+   - Delete validation:
+     - Warn (via status, not block) if application has dependents
+
+3. **Mutating Webhook** (`application_webhook.go` → `Default()`)
+   - Set `tier: standard` if not specified
+   - Set `database.version: "16"` if database specified without version
+   - Add `app.kubernetes.io/managed-by: goplatform` label
+   - Add `platform.goplatform.io/team: <team>` label from spec
+   - Set default resource sizes if workload resources not specified
+
+4. **Certificate Management**
+   - Use cert-manager for webhook TLS (standard approach)
+   - Alternative: self-signed certs via controller-runtime's built-in cert rotation
+   - Document both approaches with tradeoffs
+
+5. **Testing**
+   - envtest supports webhooks — tests run with real admission
+   - Test: invalid Application rejected with clear error message
+   - Test: Application without defaults gets them injected
+   - Test: immutable field change rejected on update
+   - Test: webhook failure policy behavior
 
 **Deliverables:**
-- [ ] TerraformRunner struct with CLI wrapper
-- [ ] Working directory management per application
-- [ ] HCL template generation from Go
-- [ ] terraform init with backend configuration
-- [ ] terraform plan with JSON output
-- [ ] terraform apply with plan file
-- [ ] terraform destroy for cleanup
-- [ ] terraform output parsing
-- [ ] Timeout and cancellation via context
-- [ ] Error parsing and classification
-- [ ] Structured logging of TF output
-- [ ] Unit tests with mocked terraform binary
-- [ ] Integration tests with LocalStack
+- [ ] Validating webhook with cross-field validation rules
+- [ ] Mutating webhook with default injection
+- [ ] Immutable field protection on updates (database.type, queue.type)
+- [ ] cert-manager configuration for webhook TLS
+- [ ] Envtest tests for validation acceptance and rejection
+- [ ] Envtest tests for mutation (verify defaults applied)
+- [ ] Documentation: webhook architecture and how admission works
 
 ---
 
-### Milestone 9: State Management - NOT STARTED
+### Milestone 8: Observability Integration - NOT STARTED
 
-**Goal:** Implement per-application Terraform state isolation with S3 backend and DynamoDB locking.
+**Goal:** Auto-generate Prometheus ServiceMonitors, PrometheusRules, and expose custom controller metrics for every Application.
 
-**Learning Focus:**
-- Terraform state mechanics and why it matters
-- S3 backend configuration
-- DynamoDB locking for concurrent access
-- State isolation strategies for multi-tenancy
+**Why This Milestone Matters:**
+Observability is not a nice-to-have — it's how you know your operator is working. Production operators expose metrics about their own performance (reconcile duration, error rate, queue depth) and generate monitoring resources for the applications they manage. This milestone teaches you the Prometheus operator ecosystem — the standard for Kubernetes monitoring.
+
+**What You'll Learn:**
+- How Prometheus discovers targets in Kubernetes (ServiceMonitor CRDs)
+- How alerting rules work (PrometheusRule CRDs)
+- Exposing custom metrics from a Go controller (prometheus client_golang)
+- The Prometheus operator ecosystem (what it does, how it works)
+- How production operators like CNPG and ArgoCD expose their own metrics
+
+**How to Build It:**
+
+1. **Controller Metrics** (internal observability — how is OUR operator performing?)
+   - Use controller-runtime's built-in metrics registry
+   - Add custom metrics:
+     ```go
+     // How long reconciliation takes
+     reconcileDuration = prometheus.NewHistogramVec(...)
+     // How many apps are in each phase
+     applicationPhaseGauge = prometheus.NewGaugeVec(...)
+     // How many errors have occurred
+     reconcileErrors = prometheus.NewCounterVec(...)
+     // How many infrastructure resources are managed
+     managedResources = prometheus.NewGaugeVec(...)
+     ```
+   - These are served on the controller's metrics endpoint (`:8443/metrics` by default)
+
+2. **ServiceMonitor Generation** (for the APPLICATION's metrics, not the controller's)
+   - When `spec.observability.metrics.enabled: true`:
+     - Create a `monitoring.coreos.com/v1` ServiceMonitor CR
+     - Target the Application's Service on the metrics port
+     - Add labels for team, app, tier (so Prometheus can filter/group)
+     - Set owner reference to the Application for cleanup
+   - Detect if Prometheus operator is installed (check for ServiceMonitor CRD)
+   - If not installed, skip ServiceMonitor creation and set a condition
+
+3. **PrometheusRule Generation** (SLA-based alerting per Application)
+   - Generate alerts based on `spec.tier`:
+     ```
+     critical tier → alert if error rate > 0.1% or P99 > 100ms
+     standard tier → alert if error rate > 0.5% or P99 > 500ms
+     development  → alert if error rate > 5% or P99 > 2s
+     ```
+   - Standard alerts for every app:
+     - Pod crash looping
+     - High restart count
+     - Container OOM killed
+     - Deployment stuck (not progressing)
+   - Create `monitoring.coreos.com/v1` PrometheusRule CR with owner reference
+
+4. **RBAC for Monitoring Resources**
+   - Add kubebuilder RBAC markers for `monitoring.coreos.com` group
+   - Run `make manifests` to update role.yaml
 
 **Deliverables:**
-- [ ] S3 backend configuration generation
-- [ ] DynamoDB lock table setup (one-time platform setup)
-- [ ] State key pattern: `apps/{namespace}/{name}/terraform.tfstate`
-- [ ] Backend config injection into generated HCL
-- [ ] Lock acquisition timeout handling
-- [ ] State file cleanup on Application delete
-- [ ] State import capability (for existing resources)
-- [ ] Tests for concurrent access scenarios
+- [ ] Custom Prometheus metrics for controller performance (reconcile duration, error count, app phase gauge, managed resources)
+- [ ] ServiceMonitor generation from Application observability spec
+- [ ] PrometheusRule generation with tier-based alerting thresholds
+- [ ] Prometheus operator CRD detection (skip if not installed, set condition)
+- [ ] Owner references on all monitoring resources
+- [ ] Cleanup when `spec.observability` is removed
+- [ ] RBAC markers for monitoring.coreos.com resources
+- [ ] Unit tests for ServiceMonitor and PrometheusRule generation
+- [ ] Documentation: how the Prometheus operator ecosystem works
 
 ---
 
-### Milestone 10: AWS RDS Module - NOT STARTED
+### Milestone 9: Drift Detection & Self-Healing - NOT STARTED
 
-**Goal:** Generate Terraform module for RDS PostgreSQL/MySQL provisioning.
+**Goal:** Detect when child resources (Deployments, Services, operator CRDs) are modified or deleted externally, and automatically restore them to match the Application spec.
 
-**Learning Focus:**
-- RDS configuration options (instance types, storage, networking)
-- Security groups and subnet groups
-- Parameter groups for database tuning
-- Backup and maintenance windows
-- Multi-AZ for high availability
+**Why This Milestone Matters:**
+This is where you go from "basic operator" to "deeply understanding reconciliation." Real-world drift happens constantly — someone manually scales a deployment, edits a service port, or deletes a secret. A robust operator detects these changes and reconciles back to desired state. This is the core value proposition of the operator pattern, and implementing it properly teaches you watch mechanics, informer caching, and conflict resolution at a deep level.
+
+**What You'll Learn:**
+- How Kubernetes watches propagate changes (owner reference → parent reconcile)
+- The difference between spec drift (someone changed a field) and state drift (something crashed)
+- Conflict resolution strategies (always overwrite vs merge vs detect-and-alert)
+- How `controllerutil.CreateOrUpdate` handles drift naturally
+- Watching secondary resources (Deployments, Services, Secrets owned by Application)
+- DriftDetector optional interface from the provider system
+
+**How to Build It:**
+
+1. **Watch Owned Resources**
+   - Ensure `SetupWithManager` uses `.Owns()` for all child resource types:
+     ```go
+     ctrl.NewControllerManagedBy(mgr).
+       For(&v1alpha1.Application{}).
+       Owns(&appsv1.Deployment{}).
+       Owns(&corev1.Service{}).
+       Owns(&corev1.ConfigMap{}).
+       Owns(&corev1.Secret{}).
+       Owns(&policyv1.PodDisruptionBudget{}).
+       Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+       Complete(r)
+     ```
+   - When an owned resource changes, the owner (Application) gets re-reconciled automatically
+
+2. **K8s Resource Drift Detection & Repair**
+   - During reconciliation, `CreateOrUpdate` already handles this:
+     - If someone manually changed a Deployment's replicas, the mutate function overwrites it
+     - If someone deleted a Service, `CreateOrUpdate` recreates it
+   - Add event recording when drift is detected and corrected:
+     ```
+     Event: Normal  DriftCorrected  "Restored Deployment spec.replicas from 5 to 3 (manual change detected)"
+     ```
+   - Add a `DriftDetected` condition that is briefly True when drift is found, then transitions back to False after correction
+
+3. **Infrastructure Drift Detection**
+   - Implement the `DriftDetector` interface on `KubernetesProvider`:
+     ```go
+     type DriftDetector interface {
+         DetectDrift(ctx context.Context, app *v1alpha1.Application) (*DriftReport, error)
+     }
+     ```
+   - Compare the actual state of operator-managed CRDs against what the Application spec expects
+   - Example: Application says `database.size: small` (1 instance, 1Gi RAM) but the CNPG Cluster has been manually edited to 3 instances
+   - Report drift in status conditions with details
+
+4. **Periodic Re-Sync**
+   - The controller already requeues on success (`RequeueAfter: 5m`)
+   - During periodic re-sync, run full drift detection
+   - This catches external changes that don't trigger watches (e.g., someone edited a CRD directly)
+
+5. **Deleted Resource Recovery**
+   - If an owned resource is deleted, the watch triggers reconciliation
+   - The reconcile loop should detect the missing resource and recreate it
+   - Test: delete a Deployment owned by an Application → verify it's recreated within seconds
 
 **Deliverables:**
-- [ ] RDS module HCL generation
-- [ ] Size mapping (small→db.t3.micro, medium→db.t3.small, large→db.m5.large)
-- [ ] Version support (PostgreSQL 13-16, MySQL 8.0)
-- [ ] Multi-AZ configuration from HA spec
-- [ ] Subnet group configuration
-- [ ] Security group with least-privilege rules
-- [ ] Parameter group for common tuning
-- [ ] Backup configuration (window, retention)
-- [ ] Maintenance window configuration
-- [ ] Master password generation (store in Secrets Manager)
-- [ ] Output extraction (endpoint, port, ARN)
-- [ ] IAM policy for application access
-- [ ] Integration tests with LocalStack
+- [ ] `.Owns()` watches for all child resource types (Deployment, Service, ConfigMap, Secret, HPA, PDB)
+- [ ] Drift detection events when `CreateOrUpdate` corrects a modification
+- [ ] `DriftDetected` status condition (True when found, False after correction)
+- [ ] `DriftDetector` interface implementation on KubernetesProvider
+- [ ] Infrastructure drift reporting (comparing operator CRD state vs expected state)
+- [ ] Deleted resource recovery (owned resource deleted → recreated)
+- [ ] Periodic re-sync validates all resources match desired state
+- [ ] Unit tests: manually modify owned resource → verify reconcile corrects it
+- [ ] Unit tests: delete owned resource → verify reconcile recreates it
+- [ ] Envtest integration tests for drift scenarios
+- [ ] Documentation: how watch propagation and drift detection work
 
 ---
 
-### Milestone 11: AWS ElastiCache Module - NOT STARTED
+## Phase 3: Advanced Patterns
 
-**Goal:** Generate Terraform module for ElastiCache Redis provisioning.
+### Milestone 10: Multi-Version CRD & Conversion Webhooks - NOT STARTED
 
-**Learning Focus:**
-- ElastiCache Redis cluster modes
-- Replication groups for HA
-- Security groups and subnet groups
-- Parameter groups for Redis tuning
-- Encryption options
+**Goal:** Add a `v1beta1` version of the Application CRD alongside `v1alpha1`, with a conversion webhook that translates between them.
+
+**Why This Milestone Matters:**
+API evolution is one of the most complex and least-documented aspects of building Kubernetes operators. Every production operator eventually needs to change its API — adding fields, renaming things, restructuring. The hub-and-spoke conversion webhook pattern is how Kubernetes itself handles this (e.g., `apps/v1beta1` Deployment → `apps/v1` Deployment). Most tutorials skip this entirely. Building it teaches you rare, valuable knowledge.
+
+**What You'll Learn:**
+- How Kubernetes stores and serves multiple API versions simultaneously
+- The hub-and-spoke conversion pattern (one "storage" version, others convert to/from it)
+- Conversion webhooks: when they're called, what they must guarantee (round-trip fidelity)
+- How to evolve a CRD without breaking existing users
+- `// +kubebuilder:storageversion` marker and what it means
+- How Kubernetes controllers handle watching resources across versions
+
+**How to Build It:**
+
+1. **Design v1beta1 API Changes**
+   - v1beta1 represents a more stable, refined API. Example changes:
+     ```go
+     // v1alpha1 (current):
+     //   spec.database.size: "small"            (string enum)
+     //   spec.database.highAvailability: true    (flat bool)
+     //   spec.observability.metrics.enabled: true
+
+     // v1beta1 (new, more structured):
+     //   spec.infrastructure.database.sizing: { cpu: "500m", memory: "1Gi", storage: "10Gi" }
+     //   spec.infrastructure.database.replicas: 3
+     //   spec.infrastructure.database.backup.schedule: "0 3 * * *"
+     //   spec.monitoring.prometheus.enabled: true
+     //   spec.monitoring.prometheus.scrapeInterval: "30s"
+     ```
+   - The key: v1beta1 is more explicit, v1alpha1 uses abstractions (size: small)
+
+2. **Scaffold v1beta1**
+   ```bash
+   kubebuilder create api --group platform --version v1beta1 --kind Application \
+     --controller=false --resource=true
+   ```
+   - Define the new types in `api/v1beta1/application_types.go`
+   - Mark v1alpha1 as the storage version initially (or v1beta1 if preferred)
+
+3. **Implement Conversion Webhook**
+   ```bash
+   kubebuilder create webhook --group platform --version v1alpha1 --kind Application \
+     --conversion --spoke v1beta1
+   ```
+   - Implement `ConvertTo(hub)` and `ConvertFrom(hub)` on the spoke version
+   - Hub version stores the canonical representation
+   - Conversion must be lossless: `v1alpha1 → hub → v1alpha1` must produce identical output
+   - Handle fields that exist in one version but not the other (annotations for overflow data)
+
+4. **Size Abstraction Mapping**
+   - v1alpha1 `size: small` → v1beta1 `sizing: { cpu: "250m", memory: "512Mi", storage: "5Gi" }`
+   - v1beta1 explicit sizing → v1alpha1 closest match ("small" / "medium" / "large") + annotation with exact values
+   - This is the hard part: lossy conversion requires annotation-based storage
+
+5. **Testing Conversion**
+   - Round-trip test: create v1alpha1 → read as v1beta1 → write back → read as v1alpha1 → compare
+   - Ensure no data loss through conversion cycle
+   - Test with envtest (supports conversion webhooks)
+   - Test kubectl with both versions: `kubectl get applications.v1alpha1.platform.goplatform.io`
 
 **Deliverables:**
-- [ ] ElastiCache module HCL generation
-- [ ] Size mapping (small→cache.t3.micro, etc.)
-- [ ] Single-node vs replication group
-- [ ] Automatic failover configuration
-- [ ] Subnet group configuration
-- [ ] Security group with least-privilege
-- [ ] Parameter group for common tuning
-- [ ] Encryption at rest and in transit
-- [ ] Auth token for Redis 6+
-- [ ] Output extraction (endpoint, port)
-- [ ] Integration tests with LocalStack
+- [ ] `api/v1beta1/application_types.go` with evolved Application spec
+- [ ] Storage version marker on hub version
+- [ ] Conversion webhook implementation (ConvertTo/ConvertFrom)
+- [ ] Size abstraction ↔ explicit sizing mapping with annotation overflow
+- [ ] Round-trip fidelity tests (v1alpha1 → hub → v1alpha1 = identical)
+- [ ] Envtest tests with both API versions simultaneously
+- [ ] Controller works correctly regardless of which version is submitted
+- [ ] Documentation: hub-and-spoke pattern, API evolution strategy, how K8s handles multi-version CRDs
 
 ---
 
-### Milestone 12: AWS SQS Module - NOT STARTED
+### Milestone 11: Policy Integration with Kyverno - NOT STARTED
 
-**Goal:** Generate Terraform module for SQS queue provisioning.
+**Goal:** Integrate with Kyverno to enforce organizational policies on Application resources, and implement pre-provisioning quota checks.
 
-**Learning Focus:**
-- SQS queue types (Standard vs FIFO)
-- Dead Letter Queues and redrive policies
-- Visibility timeout and retention
-- Access policies
+**Why This Milestone Matters:**
+Policy enforcement is how platform teams maintain guardrails without blocking developers. Instead of building a custom policy engine (which would be reinventing the wheel), you'll integrate with Kyverno — a CNCF project purpose-built for K8s policy. This teaches you the policy ecosystem, how admission policies work, and how to combine external policy engines with your operator's own validation.
+
+**What You'll Learn:**
+- How Kyverno policies work (ClusterPolicy, Policy CRDs)
+- The difference between operator validation (webhooks) and external policy (Kyverno)
+- When to use which: webhook validation for CRD-specific rules, Kyverno for organizational rules
+- ResourceQuota and LimitRange — K8s built-in resource governance
+- How to make your operator "policy-aware" (check policies before provisioning)
+
+**How to Build It:**
+
+1. **Bundled Kyverno Policies**
+   - Ship a set of ClusterPolicy CRDs in `config/policies/`:
+     ```yaml
+     # Require team label on all Applications
+     apiVersion: kyverno.io/v1
+     kind: ClusterPolicy
+     metadata:
+       name: require-team-label
+     spec:
+       validationFailureAction: Enforce
+       rules:
+         - name: check-team
+           match:
+             resources:
+               kinds: ["Application"]
+           validate:
+             message: "All Applications must have spec.team set"
+             pattern:
+               spec:
+                 team: "?*"
+     ```
+   - Policies to include:
+     - Require `spec.team` on all Applications
+     - Require `spec.owner` on critical-tier Applications
+     - Enforce `highAvailability: true` for critical tier databases
+     - Restrict `spec.database.size` to "small" for development tier
+     - Require backup enabled for production namespaces
+
+2. **Pre-Provisioning Quota Check**
+   - Before calling `provider.Provision()`, check if the namespace has ResourceQuota
+   - Calculate estimated resource usage for the new Application
+   - If it would exceed quota, set a `QuotaExceeded` condition and don't provision
+   - This is operator-level checking (complementary to Kyverno's admission-level)
+
+3. **Policy Status Reporting**
+   - Add a `PolicyCompliant` condition to Application status
+   - If Kyverno is installed, report whether the Application passes all policies
+   - If Kyverno is not installed, skip policy checking (optional integration)
+
+4. **Kyverno Detection**
+   - Check if Kyverno CRDs exist in the cluster
+   - If present, install bundled policies during operator startup
+   - If absent, log a warning and skip policy features
 
 **Deliverables:**
-- [ ] SQS module HCL generation
-- [ ] Standard queue configuration
-- [ ] FIFO queue configuration (with deduplication)
-- [ ] Dead Letter Queue with redrive policy
-- [ ] Visibility timeout configuration
-- [ ] Message retention configuration
-- [ ] Server-side encryption
-- [ ] Access policy for application
-- [ ] Output extraction (URL, ARN)
-- [ ] Integration tests with LocalStack
+- [ ] Bundled Kyverno ClusterPolicy CRDs in `config/policies/`
+- [ ] Pre-provisioning ResourceQuota check in reconciler
+- [ ] `QuotaExceeded` condition when namespace quota would be exceeded
+- [ ] `PolicyCompliant` condition in Application status
+- [ ] Kyverno CRD detection (optional integration)
+- [ ] Policy installation during operator startup (if Kyverno present)
+- [ ] Tests for quota checking logic
+- [ ] Documentation: how Kyverno works, webhook vs policy validation, when to use which
 
 ---
 
-### Milestone 13: IAM & IRSA - NOT STARTED
+### Milestone 12: E2E Testing & CI Hardening - NOT STARTED
 
-**Goal:** Generate IAM roles for applications with IRSA (IAM Roles for Service Accounts).
+**Goal:** Build a comprehensive end-to-end test suite that validates the operator on a real Kind cluster, and harden the CI pipeline for production-grade releases.
 
-**Learning Focus:**
-- IAM role trust policies
-- IRSA mechanics (OIDC provider)
-- Least-privilege IAM policies
-- Service account annotation
+**Why This Milestone Matters:**
+This is the capstone milestone. Everything you've built needs to work together in a real cluster. E2E tests catch integration issues that unit tests and envtest miss — networking, timing, RBAC, operator interactions. A hardened CI pipeline means you can confidently release changes. This is what separates a learning project from a production-grade operator.
 
-**Deliverables:**
-- [ ] IAM role module HCL generation
-- [ ] OIDC trust policy for EKS
-- [ ] Per-resource IAM policies (RDS connect, S3 access, SQS send/receive)
-- [ ] Least-privilege policy generation
-- [ ] ServiceAccount creation with annotation
-- [ ] Role ARN output for pod configuration
-- [ ] Deployment updates to use ServiceAccount
-- [ ] Tests for IAM policy correctness
+**What You'll Learn:**
+- E2E testing patterns for Kubernetes operators
+- Kind cluster management in CI
+- GitHub Actions for Go + Kubernetes projects
+- Container image building and testing
+- Release workflows (goreleaser, semantic versioning)
+- How production operators like cert-manager and ArgoCD do CI/CD
 
----
+**How to Build It:**
 
-## Phase 3: Credential Management
+1. **E2E Test Framework**
+   - Use the existing `test/e2e/` directory
+   - Create a Kind cluster with all required operators:
+     ```bash
+     kind create cluster --name goplatform-test-e2e
+     # Install CNPG operator
+     kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/main/releases/cnpg-1.25.0.yaml
+     # Install Redis operator (Spotahome)
+     helm install redis-operator ...
+     # Install RabbitMQ operator
+     kubectl apply -f https://github.com/rabbitmq/cluster-operator/releases/latest/download/cluster-operator.yml
+     # Install Prometheus operator (for ServiceMonitor/PrometheusRule tests)
+     helm install prometheus-operator ...
+     # Install goplatform controller
+     make docker-build IMG=goplatform:e2e
+     kind load docker-image goplatform:e2e --name goplatform-test-e2e
+     make deploy IMG=goplatform:e2e
+     ```
 
-### Milestone 14: Secrets Generation - NOT STARTED
+2. **E2E Test Scenarios**
+   - **Full lifecycle**: Create Application with all resource types → wait for Ready → verify all child resources → delete → verify cleanup
+   - **Partial spec**: Application with only database → verify only database provisioned
+   - **Spec update**: Change database size from small to medium → verify CNPG Cluster updated
+   - **Drift recovery**: Manually delete a child Deployment → verify it's recreated
+   - **Invalid Application**: Submit invalid spec → verify webhook rejects it
+   - **Webhook defaults**: Submit minimal spec → verify defaults are injected
+   - **Status accuracy**: Verify conditions reflect actual resource state at each stage
+   - **Finalizer cleanup**: Delete Application during provisioning → verify graceful cleanup
 
-**Goal:** Create Kubernetes Secrets from Terraform outputs for application consumption.
+3. **CI Pipeline (GitHub Actions)**
+   ```yaml
+   # .github/workflows/ci.yml
+   jobs:
+     lint:
+       - golangci-lint
+     unit-test:
+       - make test (envtest)
+     e2e-test:
+       - Create Kind cluster
+       - Install operators
+       - Build and load controller image
+       - Run e2e tests
+       - Cleanup
+     build:
+       - Build Docker image
+       - (on tag) Push to GHCR
+   ```
 
-**Deliverables:**
-- [ ] Secret generation from Terraform outputs
-- [ ] Standard secret format (DATABASE_URL, etc.)
-- [ ] Owner reference to Application
-- [ ] Secret update on infrastructure change
-- [ ] Secret deletion on Application delete
-- [ ] Support for both envFrom and volumeMount patterns
-- [ ] Tests for secret content
-
----
-
-### Milestone 15: External Secrets Integration - NOT STARTED
-
-**Goal:** Integrate with External Secrets Operator for production-grade secrets management.
-
-**Deliverables:**
-- [ ] Detect if ESO is installed in cluster
-- [ ] Generate ExternalSecret instead of Secret when ESO available
-- [ ] AWS Secrets Manager path convention
-- [ ] SecretStore reference configuration
-- [ ] Fallback to K8s Secret if ESO not available
-- [ ] Documentation for ESO setup
-
----
-
-### Milestone 16: Secrets Rotation - NOT STARTED
-
-**Goal:** Implement automatic database password rotation.
-
-**Deliverables:**
-- [ ] Detect rotation-enabled databases
-- [ ] Configure AWS SM rotation schedule
-- [ ] Lambda rotation function deployment
-- [ ] Secret rotation trigger configuration
-- [ ] Application restart strategy on rotation
-- [ ] Rotation status in Application status
-- [ ] Manual rotation trigger via annotation
-- [ ] Tests for rotation flow
-
----
-
-## Phase 4: Platform API & CLI
-
-### Milestone 17: REST API Server - NOT STARTED
-
-**Goal:** Build a REST API for platform operations beyond kubectl.
+4. **Release Workflow**
+   - Semantic versioning (v0.1.0, v0.2.0, etc.)
+   - GitHub Release with changelog
+   - Container image pushed to GHCR on tag
+   - Generated install manifest (`dist/install.yaml`)
 
 **Deliverables:**
-- [ ] HTTP server with chi or gin router
-- [ ] OpenAPI 3.0 specification
-- [ ] List applications endpoint (with filters)
-- [ ] Get application status endpoint
-- [ ] Create/update application endpoint
-- [ ] Delete application endpoint
-- [ ] Health and readiness endpoints
-- [ ] Request logging middleware
-- [ ] Error response standardization
-- [ ] Swagger UI for API documentation
-- [ ] Integration tests
-
----
-
-### Milestone 18: Cost Estimation API - NOT STARTED
-
-**Goal:** Provide cost estimation before provisioning.
-
-**Deliverables:**
-- [ ] AWS Pricing API integration
-- [ ] Price caching (refresh daily)
-- [ ] Cost calculation per resource type
-- [ ] Size → instance type → price mapping
-- [ ] Estimate endpoint in API
-- [ ] Cost in Application status
-- [ ] Cost breakdown by resource
-- [ ] Historical cost tracking (future)
-
----
-
-### Milestone 19: CLI Tool (gpctl) - NOT STARTED
-
-**Goal:** Build a CLI tool for platform interaction.
-
-**Deliverables:**
-- [ ] gpctl binary with cobra CLI framework
-- [ ] `gpctl apply -f app.yaml` - Create/update application
-- [ ] `gpctl get apps` - List applications
-- [ ] `gpctl describe app NAME` - Show details
-- [ ] `gpctl status NAME` - Show provisioning status
-- [ ] `gpctl estimate -f app.yaml` - Cost estimation
-- [ ] `gpctl logs NAME` - Show application logs
-- [ ] `gpctl delete NAME` - Delete application
-- [ ] Multiple output formats (table, json, yaml)
-- [ ] Kubeconfig context support
-- [ ] Auto-completion for bash/zsh/fish
-- [ ] Configuration file (~/.gpctl/config)
-
----
-
-### Milestone 20: Webhook Events - NOT STARTED
-
-**Goal:** Emit webhook events for application lifecycle changes.
-
-**Deliverables:**
-- [ ] WebhookConfig CRD for registering endpoints
-- [ ] Event types: ApplicationCreated, Provisioned, Failed, Deleted
-- [ ] Webhook delivery with retries
-- [ ] HMAC signature for verification
-- [ ] Delivery status tracking
-- [ ] Failed delivery alerting
-- [ ] Integration with Slack, PagerDuty, etc.
-
----
-
-## Phase 5: Observability
-
-### Milestone 21: ServiceMonitor Generation - NOT STARTED
-
-**Goal:** Auto-generate Prometheus ServiceMonitors for every application.
-
-**Deliverables:**
-- [ ] ServiceMonitor generation from Application spec
-- [ ] Metrics path and port from observability spec
-- [ ] Labels for Prometheus discovery
-- [ ] Scrape interval configuration
-- [ ] Metrics relabeling for team/app labels
-- [ ] Owner reference to Application
-- [ ] Tests for ServiceMonitor generation
-
----
-
-### Milestone 22: Grafana Dashboard Generation - NOT STARTED
-
-**Goal:** Auto-generate Grafana dashboards based on application type.
-
-**Deliverables:**
-- [ ] Dashboard JSON template system
-- [ ] Base HTTP dashboard (rate, errors, latency)
-- [ ] Language-specific panels (Go, Python, Node, Java)
-- [ ] Infrastructure panels (RDS, Redis, SQS)
-- [ ] GrafanaDashboard CRD generation
-- [ ] Dashboard links in Application status
-- [ ] Dashboard cleanup on Application delete
-
----
-
-### Milestone 23: AlertRule Generation - NOT STARTED
-
-**Goal:** Auto-generate PrometheusRules for SLA-based alerting.
-
-**Deliverables:**
-- [ ] PrometheusRule generation from Application spec
-- [ ] SLA-based alerts (based on spec.tier):
-  - Critical: <99.9% availability, P99 >100ms
-  - Standard: <99.5% availability, P99 >500ms
-  - Development: <99% availability, P99 >1s
-- [ ] High error rate alerts
-- [ ] Pod crash alerts
-- [ ] Infrastructure alerts (RDS CPU, Redis memory)
-- [ ] Alert labels (team, app, tier)
-- [ ] Owner reference to Application
-- [ ] Tests for alert generation
-
----
-
-### Milestone 24: OpenTelemetry Configuration - NOT STARTED
-
-**Goal:** Configure distributed tracing via OpenTelemetry.
-
-**Deliverables:**
-- [ ] OpenTelemetry Instrumentation CRD generation
-- [ ] Auto-instrumentation configuration per language
-- [ ] Trace collector endpoint configuration
-- [ ] Sample rate from observability spec
-- [ ] Jaeger/Tempo integration
-- [ ] Trace correlation with logs
-- [ ] Documentation for manual instrumentation
-
----
-
-## Phase 6: Service Catalog
-
-### Milestone 25: Catalog Data Model - NOT STARTED
-
-**Goal:** Design and implement the service catalog data model.
-
-**Deliverables:**
-- [ ] Service entity model
-- [ ] Team entity model
-- [ ] Relationship types (depends-on, owned-by)
-- [ ] Metadata extensibility
-- [ ] Catalog storage (in-cluster CRD or database)
-- [ ] Catalog sync from Application CRDs
-- [ ] API for catalog queries
-
----
-
-### Milestone 26: Dependency Tracking - NOT STARTED
-
-**Goal:** Track and visualize service dependencies.
-
-**Deliverables:**
-- [ ] Dependency extraction from Application spec
-- [ ] Dependency validation (target exists)
-- [ ] Dependency graph building
-- [ ] Impact analysis API ("what depends on X?")
-- [ ] Circular dependency detection
-- [ ] Dependency visualization endpoint (for UI)
-- [ ] Startup ordering from dependency graph
-- [ ] Tests for graph operations
-
----
-
-### Milestone 27: Team Ownership - NOT STARTED
-
-**Goal:** Track team ownership and enable team-based views.
-
-**Deliverables:**
-- [ ] Team CRD (or annotation-based)
-- [ ] Team → Applications mapping
-- [ ] Team list endpoint
-- [ ] Applications by team endpoint
-- [ ] Team contact information
-- [ ] On-call integration metadata
-- [ ] Team dashboards in Grafana
-
----
-
-### Milestone 28: Resource Templates - NOT STARTED
-
-**Goal:** Provide pre-built templates for common application patterns.
-
-**Deliverables:**
-- [ ] Template CRD or embedded templates
-- [ ] Template for Go REST API
-- [ ] Template for background worker
-- [ ] Template for frontend BFF
-- [ ] gpctl command to list templates
-- [ ] gpctl command to scaffold from template
-- [ ] Template validation
-- [ ] Custom template support
-
----
-
-## Phase 7: Developer Experience
-
-### Milestone 29: Environment Promotion - NOT STARTED
-
-**Goal:** Enable configuration promotion from dev → staging → prod.
-
-**Deliverables:**
-- [ ] Environment concept (dev/staging/prod)
-- [ ] EnvironmentConfig CRD for overrides
-- [ ] Base + overlay configuration merge
-- [ ] Promote command in gpctl
-- [ ] Promotion diff preview
-- [ ] Promotion history tracking
-- [ ] Approval workflow for production (annotation-based)
-
----
-
-### Milestone 30: Preview Environments - NOT STARTED
-
-**Goal:** Auto-create full stack preview environments for pull requests.
-
-**Deliverables:**
-- [ ] PreviewEnvironment CRD
-- [ ] Preview namespace provisioning
-- [ ] Local provider for preview (no cloud costs)
-- [ ] Ingress/URL generation for preview
-- [ ] TTL-based auto-cleanup
-- [ ] GitHub/GitLab webhook integration
-- [ ] PR comment with preview URL
-- [ ] Preview status in CI checks
-- [ ] gpctl preview commands
-
----
-
-### Milestone 31: Local Development Mode - NOT STARTED
-
-**Goal:** Enable developers to run the same stack locally.
-
-**Deliverables:**
-- [ ] LocalProvider implementation
-- [ ] CloudNativePG for local PostgreSQL
-- [ ] Redis operator for local Redis
-- [ ] Local SQS alternative (ElasticMQ or fake SQS)
-- [ ] Docker Compose generation from Application
-- [ ] Tilt or Skaffold integration
-- [ ] gpctl local commands
-- [ ] Documentation for local development
-
----
-
-### Milestone 32: Drift Detection - NOT STARTED
-
-**Goal:** Detect when cloud infrastructure drifts from desired state.
-
-**Deliverables:**
-- [ ] Periodic drift detection job
-- [ ] Terraform plan for drift detection
-- [ ] Drift status condition
-- [ ] Drift alert generation
-- [ ] Auto-heal option (configurable)
-- [ ] Drift report in Application status
-- [ ] gpctl drift command
-- [ ] Metrics for drift events
-
----
-
-## Phase 8: Production Hardening
-
-### Milestone 33: Policy Enforcement - NOT STARTED
-
-**Goal:** Implement policy-as-code for infrastructure compliance.
-
-**Deliverables:**
-- [ ] Built-in policies:
-  - Resource limits required
-  - Team label required
-  - Database backup required for production
-  - HA required for critical tier
-- [ ] Policy CRD for custom policies
-- [ ] Compliance status in Application
-- [ ] Policy violation alerts
-- [ ] Exception workflow (with approvals)
-- [ ] Compliance dashboard
-
----
-
-### Milestone 34: Team Quotas & Budgets - NOT STARTED
-
-**Goal:** Implement cost controls per team.
-
-**Deliverables:**
-- [ ] TeamQuota CRD (max applications, max resources)
-- [ ] Budget tracking per team
-- [ ] Budget alert thresholds
-- [ ] Quota enforcement on provisioning
-- [ ] Cost dashboard per team
-- [ ] Monthly cost reports
-- [ ] Chargeback integration (Kubecost, etc.)
-
----
-
-### Milestone 35: Audit Logging - NOT STARTED
-
-**Goal:** Implement comprehensive audit logging.
-
-**Deliverables:**
-- [ ] Audit log for all mutations (create, update, delete)
-- [ ] Who/what/when/where captured
-- [ ] Audit log storage (CloudWatch, Loki)
-- [ ] Audit log retention policies
-- [ ] Audit log search API
-- [ ] Integration with SIEM tools
-- [ ] Compliance reports
-
----
-
-### Milestone 36: High Availability & Scaling - NOT STARTED
-
-**Goal:** Production-harden the platform controller.
-
-**Deliverables:**
-- [ ] Leader election for controller HA
-- [ ] Multiple controller replicas
-- [ ] Work queue rate limiting
-- [ ] Terraform concurrency limits
-- [ ] Circuit breaker for AWS API
-- [ ] Graceful shutdown handling
-- [ ] Controller metrics (queue depth, reconcile time)
-- [ ] Health and readiness probes
-- [ ] PodDisruptionBudget for controller
+- [ ] Kind cluster setup script with all required operators
+- [ ] E2E test suite covering full lifecycle, updates, drift, webhooks
+- [ ] GitHub Actions CI: lint + unit test + e2e test
+- [ ] Docker image build and push workflow
+- [ ] Release workflow with semantic versioning
+- [ ] `make test-e2e` target that runs the full suite
+- [ ] CI runs on every PR and push to main
+- [ ] Documentation: how to run e2e tests locally, CI architecture
 
 ---
 
 ## Architectural Decisions
 
-Track key architectural decisions as they are made:
-
 | Decision | Options Considered | Choice | Reasoning |
 |----------|-------------------|--------|-----------|
 | Cloud abstraction | Direct AWS calls, XRD-style, Interface pattern | Interface pattern | Simpler than XRDs, more flexible than direct calls |
-| Credential passing | K8s Secrets, ESO, CSI driver | K8s Secrets + ESO support | Simple by default, ESO for production |
-| RBAC approach | Platform-level, K8s RBAC only | K8s RBAC + policies, then platform-level | Don't reinvent, add when needed |
-| Local Kubernetes | minikube, kind, k3s, Colima | Colima | Docker runtime, good macOS support |
-| _More to fill during development_ | | | |
+| Infrastructure | Terraform subprocess, Crossplane, ACK, K8s-native operators | K8s-native (CNPG, Redis, RabbitMQ) | Aligned with K8s learning goal, no subprocess complexity |
+| Developer interface | kubectl, CLI (gpctl), REST API | kubectl only | Keep focus on operator patterns, kubectl is sufficient |
+| Credential passing | K8s Secrets, ESO, CSI driver | K8s Secrets | Simple, works everywhere, ESO can be added later |
+| Policy engine | Custom validation, OPA, Kyverno | Kyverno integration | Don't reinvent, learn the ecosystem instead |
+| Local Kubernetes | minikube, kind, k3s, Colima | Kind (testing) + Colima (dev) | Kind for CI, Colima for daily dev |
 
 ---
 
 ## Concepts Learned
 
-Track platform engineering concepts learned during development:
-
 | Concept | Description | Where Applied |
 |---------|-------------|---------------|
 | Reconciliation Pattern | Level-triggered, idempotent state management | M2 |
-| Finalizer Pattern | Block deletion until cleanup complete | M5 |
 | Owner References | Automatic garbage collection of child resources | M3 |
 | Conditions | Multi-dimensional status reporting | M4 |
-| IRSA | Per-pod AWS credentials without shared secrets | M13 |
-| External Secrets | Sync cloud secrets to K8s | M15 |
-| _More to fill during development_ | | |
+| Finalizer Pattern | Block deletion until cleanup complete | M4 |
+| Provider Interface | Pluggable infrastructure abstraction | M5 |
+| Factory Pattern | Configuration-driven provider instantiation | M5 |
+| Typed Errors | Domain-specific error types for infrastructure failures | M5 |
+| Operator CRD Discovery | Checking for third-party CRDs before creating resources | M5 |
 
 ---
 
 ## Known Issues
 
-Track issues discovered during development:
-
 | Issue | Severity | Status | Notes |
 |-------|----------|--------|-------|
-| _None yet_ | | | |
-
+| PROGRESS.md had milestone numbering mismatch | Low | ✅ Fixed | Renumbered in scope revision |
+| M4/M5 marked "NOT STARTED" but code exists | Low | ✅ Fixed | Properly marked as completed |
+| KubernetesProvider not wired into controller | Medium | Open | Addressed in M6 |

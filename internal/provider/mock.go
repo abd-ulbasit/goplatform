@@ -207,15 +207,16 @@ func (m *MockProvider) Healthy(ctx context.Context) bool {
 // Provision creates or updates infrastructure for an Application.
 // =============================================================================
 // BEHAVIOR:
-//   1. First call: Creates state with Phase=Provisioning
-//   2. Subsequent calls before ProvisionDelay: Returns Provisioning state
-//   3. Calls after ProvisionDelay: Returns Ready state with mock endpoints
+//  1. First call: Creates state with Phase=Provisioning
+//  2. Subsequent calls before ProvisionDelay: Returns Provisioning state
+//  3. Calls after ProvisionDelay: Returns Ready state with mock endpoints
 //
 // MOCK DATA GENERATION:
 //   - Endpoints: {app-name}.mock.local
 //   - Ports: Standard ports (5432 for Postgres, 6379 for Redis)
 //   - Secrets: Reference to mock secret (not actually created)
 //   - Resource IDs: mock-{resource-type}-{app-name}
+//
 // =============================================================================
 func (m *MockProvider) Provision(ctx context.Context, app *platformv1alpha1.Application) (*ResourceState, error) {
 	logger := log.FromContext(ctx)
@@ -307,9 +308,9 @@ func (m *MockProvider) createInitialState(app *platformv1alpha1.Application, sta
 		ProvisioningStartTime: &startTime,
 		LastUpdateTime:        startTime,
 		ProviderMetadata: map[string]string{
-			"provider":     "mock",
-			"provisionId":  fmt.Sprintf("mock-%s-%d", app.Name, startTime.Unix()),
-			"startedAt":    startTime.Format(time.RFC3339),
+			"provider":    "mock",
+			"provisionId": fmt.Sprintf("mock-%s-%d", app.Name, startTime.Unix()),
+			"startedAt":   startTime.Format(time.RFC3339),
 		},
 	}
 

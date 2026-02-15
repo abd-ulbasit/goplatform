@@ -792,36 +792,34 @@ func TestFactory_GetProvider_AWS_NotImplemented(t *testing.T) {
 	}
 }
 
-func TestFactory_GetProvider_Kubernetes_NotImplemented(t *testing.T) {
+func TestFactory_GetProvider_Kubernetes_Registered(t *testing.T) {
 	// ==========================================================================
 	// KUBERNETES-NATIVE PROVIDER TEST
 	//
-	// The Kubernetes provider will deploy resources in-cluster using operators.
-	// It's not implemented yet, so this test verifies the placeholder error.
-	//
-	// WHEN IMPLEMENTED, this test should be updated to verify:
-	//   1. Creates CloudNativePG Cluster for PostgreSQL
-	//   2. Creates Redis CR or StatefulSet for cache
-	//   3. Creates RabbitmqCluster for queues
-	//   4. Creates PVCs for storage
-	//
+	// The Kubernetes provider requires a live kubeconfig when using the
+	// built-in constructor. For unit tests, we register a custom constructor
+	// so the factory path is still verified without external dependencies.
 	// ==========================================================================
 	factory := NewFactory()
+	customProvider := &testProvider{name: "kubernetes-test"}
+	factory.RegisterProvider(ProviderKubernetes, func(config *ProviderConfig) (InfrastructureProvider, error) {
+		return customProvider, nil
+	})
 	factory.SetConfig(&ProviderConfig{
 		Provider: ProviderKubernetes,
 		Kubernetes: &KubernetesConfig{
 			PostgresOperator: "cnpg",
-			RedisOperator:    "bitnami",
+			RedisOperator:    "spotahome",
 			StorageClass:     "standard",
 		},
 	})
 
-	_, err := factory.GetProvider()
-	if err == nil {
-		t.Fatal("GetProvider() for Kubernetes should return error (not implemented yet)")
+	provider, err := factory.GetProvider()
+	if err != nil {
+		t.Fatalf("GetProvider() for Kubernetes error = %v", err)
 	}
-	if !IsProviderNotConfigured(err) {
-		t.Errorf("error should be ProviderNotConfiguredError, got %T", err)
+	if provider != customProvider {
+		t.Errorf("GetProvider() should return registered provider")
 	}
 }
 

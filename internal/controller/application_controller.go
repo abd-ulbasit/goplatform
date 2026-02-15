@@ -167,6 +167,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	platformv1alpha1 "github.com/abd-ulbasit/goplatform/api/v1alpha1"
+	"github.com/abd-ulbasit/goplatform/internal/provider"
 )
 
 // =============================================================================
@@ -267,6 +268,16 @@ type ApplicationReconciler struct {
 	//   - AWS ACK: calls AWS Delete APIs and waits for terminal state
 	//
 	CleanupExternalResources func(ctx context.Context, app *platformv1alpha1.Application) error
+
+	// ProviderFactory creates InfrastructureProvider instances for provisioning.
+	//
+	// WHY A FACTORY:
+	//   - Decouples controller from specific provider implementations
+	//   - Allows config-driven selection (AWS/GCP/K8s/Mock)
+	//   - Supports dependency injection in tests
+	//
+	// If nil, the controller will lazily create a default factory.
+	ProviderFactory *provider.Factory
 }
 
 // =============================================================================
@@ -523,6 +534,54 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// =========================================================================
+	// STEP 4.5: PROVISION INFRASTRUCTURE VIA PROVIDER
+	// =========================================================================
+	//
+	// If the Application requests infrastructure (database/cache/queue/storage),
+	// we delegate to the InfrastructureProvider implementation.
+	//
+	// This is the core of our Layer 4 abstraction:
+	//   Application spec → Provider (K8s/AWS/GCP/Mock) → ResourceState
+	//
+	// HOW CROSSPLANE DOES IT:
+	//   - Crossplane creates Managed Resources per component
+	//   - Each Managed Resource has its own controller
+	//   - We use a single provider to keep things simpler for now
+	//
+	// =========================================================================
+
+	requeueAfter := requeueAfterSuccess
+	var infraState *provider.ResourceState
+	infraRequested := app.Spec.Database != nil || app.Spec.Cache != nil || app.Spec.Queue != nil || app.Spec.Storage != nil
+	if infraRequested {
+		prov, err := r.getProvider()
+		if err != nil {
+			logger.Error(err, "failed to get infrastructure provider")
+			r.setFailedCondition(ctx, &app, "ProviderUnavailable", err.Error())
+			return ctrl.Result{}, nil
+		}
+
+		infraState, err = prov.Provision(ctx, &app)
+		if err != nil {
+			// NotReady is expected during provisioning; continue to update status.
+			if provider.IsNotReady(err) {
+				logger.Info("infrastructure still provisioning", "error", err.Error())
+				requeueAfter = requeueAfterError
+			} else if provider.IsInvalidConfig(err) || provider.IsProviderNotConfigured(err) {
+				// Invalid config or missing provider should not be retried automatically.
+				r.setFailedCondition(ctx, &app, "InfrastructureInvalid", err.Error())
+				return ctrl.Result{}, nil
+			} else if provider.IsRetryable(err) {
+				// Retryable errors get requeued; treat as provisioning.
+				logger.Info("retryable infrastructure error", "error", err.Error())
+				requeueAfter = requeueAfterError
+			} else {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	// =========================================================================
 	// STEP 5: UPDATE STATUS WITH RETRY
 	// =========================================================================
 	//
@@ -561,11 +620,16 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		originalStatus := app.Status
 
-		// Update conditions
-		r.updateConditions(ctx, &app, deploymentReady, serviceReady)
+		// Update infrastructure status from provider state
+		r.applyInfrastructureStatus(&app, infraState)
+
+		// Update conditions (includes infrastructure readiness)
+		infraReady := r.updateInfrastructureConditions(ctx, &app, infraState)
+		r.updateWorkloadConditions(ctx, &app, deploymentReady)
+		r.updateOverallReadyCondition(ctx, &app, serviceReady, infraReady)
 
 		// Set overall phase
-		if deploymentReady && serviceReady {
+		if deploymentReady && serviceReady && infraReady {
 			app.Status.Phase = platformv1alpha1.ApplicationReady
 		} else {
 			app.Status.Phase = platformv1alpha1.ApplicationProvisioning
@@ -612,7 +676,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		"serviceReady", serviceReady,
 	)
 
-	return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // =============================================================================
@@ -701,19 +765,30 @@ func (r *ApplicationReconciler) handleDeletion(ctx context.Context, app *platfor
 	// CLEANUP EXTERNAL RESOURCES
 	// =========================================================================
 	//
-	// In future milestones, this is where we'll call:
-	//   - Terraform destroy for AWS resources
-	//   - Crossplane composite deletion
-	//   - Any other external cleanup
-	//
-	// For now, Kubernetes garbage collection handles owned resources
-	// (Deployment, Service) via OwnerReference.
+	// We call the provider's Destroy() to remove external resources.
+	// This is the primary cleanup path for infrastructure created by providers.
 	//
 	// =========================================================================
 
-	// TODO(M6): Replace this hook with InfrastructureProvider.Destroy().
-	// For now, owned resources are garbage collected automatically.
-	if r.CleanupExternalResources != nil {
+	if r.ProviderFactory != nil {
+		prov, err := r.getProvider()
+		if err != nil {
+			logger.Error(err, "failed to get provider during deletion")
+			return ctrl.Result{RequeueAfter: requeueAfterError}, err
+		}
+
+		if err := prov.Destroy(ctx, app); err != nil {
+			logger.Error(err, "provider cleanup failed")
+			if r.Recorder != nil {
+				r.Recorder.Event(app, corev1.EventTypeWarning, "CleanupFailed",
+					fmt.Sprintf("Provider cleanup failed: %v", err))
+			}
+			if provider.IsNotReady(err) || provider.IsRetryable(err) {
+				return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	} else if r.CleanupExternalResources != nil {
 		if err := r.CleanupExternalResources(ctx, app); err != nil {
 			logger.Error(err, "external cleanup failed")
 			if r.Recorder != nil {
@@ -1498,17 +1573,9 @@ func (r *ApplicationReconciler) buildLabels(app *platformv1alpha1.Application) m
 	}
 }
 
-// updateConditions sets the status conditions based on current state.
-func (r *ApplicationReconciler) updateConditions(ctx context.Context, app *platformv1alpha1.Application, deploymentReady, serviceReady bool) {
+// updateWorkloadConditions sets workload-related conditions based on Deployment state.
+func (r *ApplicationReconciler) updateWorkloadConditions(ctx context.Context, app *platformv1alpha1.Application, deploymentReady bool) {
 	observedGeneration := app.Generation
-
-	// =========================================================================
-	// WORKLOAD CONDITION
-	// =========================================================================
-	//
-	// If no workload is specified, we treat workload as ready (infra-only app).
-	// Otherwise, readiness reflects Deployment status.
-	// =========================================================================
 
 	workloadStatus := metav1.ConditionFalse
 	workloadReason := "DeploymentNotReady"
@@ -1532,59 +1599,227 @@ func (r *ApplicationReconciler) updateConditions(ctx context.Context, app *platf
 		observedGeneration,
 	)
 	r.applyCondition(ctx, app, workloadCondition)
+}
 
-	// =========================================================================
-	// INFRASTRUCTURE CONDITIONS
-	// =========================================================================
-	//
-	// At this milestone we haven't implemented provisioning yet.
-	// We still report conditions so users can see *what is expected*.
-	//
-	// - If a component is NOT requested, its condition is True (NotRequested)
-	// - If a component IS requested, its condition is False (ProvisioningPending)
-	//
-	// This mirrors how Crossplane reports Ready=False while resources are
-	// being created, even if the provider is not yet wired in.
-	// =========================================================================
+// updateInfrastructureConditions maps provider state to Kubernetes conditions.
+// Returns true if all requested infrastructure components are ready.
+func (r *ApplicationReconciler) updateInfrastructureConditions(
+	ctx context.Context,
+	app *platformv1alpha1.Application,
+	infraState *provider.ResourceState,
+) bool {
+	observedGeneration := app.Generation
 
-	databaseReady := r.setInfrastructureCondition(
+	getPhase := func(statePhase provider.ResourcePhase) provider.ResourcePhase {
+		return statePhase
+	}
+
+	// Database
+	dbPhase := provider.ResourceProvisioning
+	if infraState != nil && infraState.Database != nil {
+		dbPhase = getPhase(infraState.Database.Phase)
+	}
+	databaseReady := r.applyInfrastructureCondition(
 		ctx,
 		app,
 		platformv1alpha1.ConditionTypeDatabaseReady,
-		app.Spec.Database != nil,
 		"Database",
+		app.Spec.Database != nil,
+		dbPhase,
+		infraStateMessage(infraState, "database"),
+		observedGeneration,
 	)
-	cacheReady := r.setInfrastructureCondition(
+
+	// Cache
+	cachePhase := provider.ResourceProvisioning
+	if infraState != nil && infraState.Cache != nil {
+		cachePhase = getPhase(infraState.Cache.Phase)
+	}
+	cacheReady := r.applyInfrastructureCondition(
 		ctx,
 		app,
 		platformv1alpha1.ConditionTypeCacheReady,
-		app.Spec.Cache != nil,
 		"Cache",
+		app.Spec.Cache != nil,
+		cachePhase,
+		infraStateMessage(infraState, "cache"),
+		observedGeneration,
 	)
-	queueReady := r.setInfrastructureCondition(
+
+	// Queue
+	queuePhase := provider.ResourceProvisioning
+	if infraState != nil && infraState.Queue != nil {
+		queuePhase = getPhase(infraState.Queue.Phase)
+	}
+	queueReady := r.applyInfrastructureCondition(
 		ctx,
 		app,
 		platformv1alpha1.ConditionTypeQueueReady,
-		app.Spec.Queue != nil,
 		"Queue",
+		app.Spec.Queue != nil,
+		queuePhase,
+		infraStateMessage(infraState, "queue"),
+		observedGeneration,
 	)
-	storageReady := r.setInfrastructureCondition(
+
+	// Storage
+	storagePhase := provider.ResourceProvisioning
+	if infraState != nil && infraState.Storage != nil {
+		storagePhase = getPhase(infraState.Storage.Phase)
+	}
+	storageReady := r.applyInfrastructureCondition(
 		ctx,
 		app,
 		platformv1alpha1.ConditionTypeStorageReady,
-		app.Spec.Storage != nil,
 		"Storage",
+		app.Spec.Storage != nil,
+		storagePhase,
+		infraStateMessage(infraState, "storage"),
+		observedGeneration,
 	)
 
 	// Ensure Infrastructure status object exists when any infra is requested
 	r.ensureInfrastructureStatus(app)
 
-	// =========================================================================
-	// OVERALL READY CONDITION
-	// =========================================================================
+	return databaseReady && cacheReady && queueReady && storageReady
+}
 
-	infraReady := databaseReady && cacheReady && queueReady && storageReady
-	overallReady := workloadStatus == metav1.ConditionTrue && serviceReady && infraReady
+// applyInfrastructureCondition maps a ResourcePhase to a Kubernetes Condition.
+func (r *ApplicationReconciler) applyInfrastructureCondition(
+	ctx context.Context,
+	app *platformv1alpha1.Application,
+	conditionType string,
+	componentName string,
+	requested bool,
+	phase provider.ResourcePhase,
+	message string,
+	observedGeneration int64,
+) bool {
+	status := metav1.ConditionFalse
+	reason := fmt.Sprintf("%sProvisioning", componentName)
+	if message == "" {
+		message = fmt.Sprintf("%s provisioning", componentName)
+	}
+
+	if !requested {
+		status = metav1.ConditionTrue
+		reason = fmt.Sprintf("%sNotRequested", componentName)
+		message = fmt.Sprintf("%s not requested", componentName)
+	} else {
+		switch phase {
+		case provider.ResourceReady:
+			status = metav1.ConditionTrue
+			reason = fmt.Sprintf("%sReady", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s ready", componentName)
+			}
+		case provider.ResourceFailed:
+			reason = fmt.Sprintf("%sFailed", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s failed", componentName)
+			}
+		case provider.ResourceDeleting:
+			reason = fmt.Sprintf("%sDeleting", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s deleting", componentName)
+			}
+		case provider.ResourceUpdating:
+			reason = fmt.Sprintf("%sUpdating", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s updating", componentName)
+			}
+		case provider.ResourceNotFound:
+			reason = fmt.Sprintf("%sNotFound", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s not found", componentName)
+			}
+		case provider.ResourceProvisioning, provider.ResourceUnknown:
+			// keep defaults
+		default:
+			reason = fmt.Sprintf("%sUnknown", componentName)
+			if message == "" {
+				message = fmt.Sprintf("%s unknown", componentName)
+			}
+		}
+	}
+
+	condition := platformv1alpha1.NewCondition(
+		conditionType,
+		status,
+		reason,
+		message,
+		observedGeneration,
+	)
+	r.applyCondition(ctx, app, condition)
+
+	return status == metav1.ConditionTrue
+}
+
+// applyInfrastructureStatus maps provider state to ApplicationStatus.Infrastructure.
+func (r *ApplicationReconciler) applyInfrastructureStatus(app *platformv1alpha1.Application, infraState *provider.ResourceState) {
+	if app == nil {
+		return
+	}
+
+	if app.Spec.Database == nil && app.Spec.Cache == nil && app.Spec.Queue == nil && app.Spec.Storage == nil {
+		app.Status.Infrastructure = nil
+		return
+	}
+
+	r.ensureInfrastructureStatus(app)
+
+	if app.Spec.Database != nil && infraState != nil && infraState.Database != nil {
+		app.Status.Infrastructure.Database = &platformv1alpha1.DatabaseStatus{
+			Endpoint:  infraState.Database.Endpoint,
+			Port:      infraState.Database.Port,
+			SecretRef: infraState.Database.SecretRef,
+		}
+	} else if app.Spec.Database == nil {
+		app.Status.Infrastructure.Database = nil
+	}
+
+	if app.Spec.Cache != nil && infraState != nil && infraState.Cache != nil {
+		app.Status.Infrastructure.Cache = &platformv1alpha1.CacheStatus{
+			Endpoint: infraState.Cache.Endpoint,
+			Port:     infraState.Cache.Port,
+		}
+	} else if app.Spec.Cache == nil {
+		app.Status.Infrastructure.Cache = nil
+	}
+
+	if app.Spec.Queue != nil && infraState != nil && infraState.Queue != nil {
+		app.Status.Infrastructure.Queue = &platformv1alpha1.QueueStatus{
+			URL:                infraState.Queue.URL,
+			ARN:                infraState.Queue.ARN,
+			DeadLetterQueueURL: infraState.Queue.DeadLetterQueueURL,
+		}
+	} else if app.Spec.Queue == nil {
+		app.Status.Infrastructure.Queue = nil
+	}
+
+	if app.Spec.Storage != nil && infraState != nil && infraState.Storage != nil {
+		app.Status.Infrastructure.Storage = &platformv1alpha1.StorageStatus{
+			BucketName: infraState.Storage.BucketName,
+			Region:     infraState.Storage.Region,
+		}
+	} else if app.Spec.Storage == nil {
+		app.Status.Infrastructure.Storage = nil
+	}
+}
+
+// updateOverallReadyCondition sets the Ready condition based on workload, service, and infra.
+func (r *ApplicationReconciler) updateOverallReadyCondition(
+	ctx context.Context,
+	app *platformv1alpha1.Application,
+	serviceReady bool,
+	infraReady bool,
+) {
+	observedGeneration := app.Generation
+
+	workloadCond := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeWorkloadReady)
+	workloadReady := workloadCond != nil && workloadCond.Status == metav1.ConditionTrue
+
+	overallReady := workloadReady && serviceReady && infraReady
 
 	readyReason := "ResourcesNotReady"
 	readyMessage := "Some resources are still being provisioned"
@@ -1594,7 +1829,7 @@ func (r *ApplicationReconciler) updateConditions(ctx context.Context, app *platf
 	} else if !serviceReady {
 		readyReason = "ServiceNotReady"
 		readyMessage = "Service is not ready"
-	} else if workloadStatus != metav1.ConditionTrue {
+	} else if !workloadReady {
 		readyReason = "WorkloadNotReady"
 		readyMessage = "Workload is not ready"
 	} else if !infraReady {
@@ -1615,6 +1850,40 @@ func (r *ApplicationReconciler) updateConditions(ctx context.Context, app *platf
 		observedGeneration,
 	)
 	r.applyCondition(ctx, app, readyCondition)
+}
+
+// getProvider returns the configured InfrastructureProvider.
+// Lazily creates a factory if none is provided.
+func (r *ApplicationReconciler) getProvider() (provider.InfrastructureProvider, error) {
+	if r.ProviderFactory == nil {
+		r.ProviderFactory = provider.NewFactory()
+	}
+	return r.ProviderFactory.GetProvider()
+}
+
+func infraStateMessage(state *provider.ResourceState, component string) string {
+	if state == nil {
+		return ""
+	}
+	switch component {
+	case "database":
+		if state.Database != nil {
+			return state.Database.Message
+		}
+	case "cache":
+		if state.Cache != nil {
+			return state.Cache.Message
+		}
+	case "queue":
+		if state.Queue != nil {
+			return state.Queue.Message
+		}
+	case "storage":
+		if state.Storage != nil {
+			return state.Storage.Message
+		}
+	}
+	return ""
 }
 
 // setFailedCondition updates status to indicate a failure.

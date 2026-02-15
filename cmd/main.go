@@ -37,6 +37,7 @@ import (
 
 	platformv1alpha1 "github.com/abd-ulbasit/goplatform/api/v1alpha1"
 	"github.com/abd-ulbasit/goplatform/internal/controller"
+	"github.com/abd-ulbasit/goplatform/internal/provider"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,12 +179,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	providerFactory := provider.NewFactory()
+	providerFactory.RegisterProvider(provider.ProviderKubernetes, func(cfg *provider.ProviderConfig) (provider.InfrastructureProvider, error) {
+		return provider.NewKubernetesProvider(cfg, mgr.GetClient(), mgr.GetScheme(), nil)
+	})
+
 	if err := (&controller.ApplicationReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		// EventRecorder for emitting Kubernetes Events on resource operations.
 		// Events provide operational visibility via kubectl describe.
 		Recorder: mgr.GetEventRecorderFor("application-controller"),
+		// ProviderFactory wires in InfrastructureProvider implementations.
+		ProviderFactory: providerFactory,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Application")
 		os.Exit(1)

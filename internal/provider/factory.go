@@ -238,18 +238,11 @@ func (f *Factory) createProvider(config *ProviderConfig) (InfrastructureProvider
 		//   - Storage: PersistentVolumeClaims
 		//
 		// IMPLEMENTATION NOTE:
-		//   The actual KubernetesProvider is NOT yet implemented.
-		//   When implemented, it will:
-		//     1. Check required operators are installed
-		//     2. Create appropriate CRDs (Cluster, Redis, RabbitmqCluster)
-		//     3. Wait for resources to be ready
-		//     4. Extract connection info and create Secrets
-		//
+		//   The KubernetesProvider creates operator CRDs and Secrets in-cluster.
+		//   It requires access to kubeconfig; if none is available, it returns
+		//   ProviderNotConfigured with remediation guidance.
 		// ==========================================================================
-		return nil, &ProviderNotConfiguredError{
-			Provider: ProviderKubernetes,
-			Message:  "Kubernetes provider is not yet implemented; coming in future milestone",
-		}
+		return NewKubernetesProvider(config, nil, nil, nil)
 
 	default:
 		return nil, &ProviderNotConfiguredError{
@@ -297,6 +290,8 @@ func (f *Factory) loadConfig() (*ProviderConfig, error) {
 		config.Provider = ProviderAWS
 	case "gcp":
 		config.Provider = ProviderGCP
+	case "kubernetes":
+		config.Provider = ProviderKubernetes
 	case "local":
 		config.Provider = ProviderLocal
 	case "mock":
@@ -320,6 +315,9 @@ func (f *Factory) loadConfig() (*ProviderConfig, error) {
 			return nil, err
 		}
 		config.GCP = gcpConfig
+
+	case ProviderKubernetes:
+		config.Kubernetes = &KubernetesConfig{}
 
 	case ProviderLocal, ProviderMock:
 		config.Local = &LocalConfig{

@@ -1,59 +1,60 @@
 # GoPlatform Project Brief
 
 ## Overview
-GoPlatform is an Internal Developer Platform (IDP) - a Kubernetes operator that automates infrastructure provisioning for developers. It transforms declarative Application CRDs into fully provisioned, observable infrastructure.
+GoPlatform is a Kubernetes operator built with kubebuilder v4 that automates infrastructure provisioning for developers. It transforms declarative Application CRDs into fully provisioned Kubernetes infrastructure using in-cluster operators (CloudNativePG, Redis, RabbitMQ).
 
 ## Why This Project Exists
 
-### The Problem
-Platform teams spend endless hours on:
-1. **Ticket-based provisioning** - "Please create my database" (3-day SLA)
-2. **Snowflake infrastructure** - Every service configured differently
-3. **Knowledge silos** - Only platform team knows how to deploy
-4. **Compliance gaps** - Manual security reviews, inconsistent policies
-5. **Cost opacity** - No idea what each team spends
+### The Purpose
+Learn Kubernetes operator patterns deeply by building a real Internal Developer Platform. AI writes production-grade code; the developer reads every line to learn K8s internals, controller-runtime, CRDs, webhooks, and the CNCF ecosystem.
 
-### The Solution
-GoPlatform lets developers declare what they need, and the platform provisions everything automatically:
-- Kubernetes resources (Deployment, Service, HPA)
-- AWS infrastructure (RDS, ElastiCache, SQS)
-- Observability (Prometheus, Grafana, Alerting)
-- Service catalog entry
+### What It Does
+Developers declare what they need via an Application CRD. The operator provisions:
+- Kubernetes resources (Deployment, Service, HPA, PDB)
+- In-cluster databases (CloudNativePG PostgreSQL)
+- In-cluster caches (Redis via Spotahome operator)
+- In-cluster queues (RabbitMQ Cluster Operator)
+- Credential Secrets with connection strings
+- Monitoring resources (ServiceMonitor, PrometheusRule)
 
 ## Core Goals
 
-1. **Self-Service Infrastructure** - Developers get what they need without tickets
-2. **Golden Paths** - Standardized, compliant infrastructure by default
-3. **Observability by Default** - Every app gets monitoring automatically
-4. **Cost Visibility** - Track costs per team and application
-5. **Developer Experience** - Simple YAML, instant infrastructure
+1. **Learn K8s Operator Patterns** - controller-runtime, CRDs, reconciliation, webhooks, multi-version APIs
+2. **Learn CNCF Ecosystem** - Prometheus, Kyverno, cert-manager, operator interoperability
+3. **Self-Service Infrastructure** - Developers get what they need via simple YAML
+4. **Production Patterns** - Build with the same patterns used by cert-manager, ArgoCD, CNPG
 
 ## Technical Approach
 
-- **Kubernetes Operator** - CRD-based, reconciliation pattern
-- **Terraform Integration** - Reuse existing modules, proper state management
-- **Platform API** - REST + gRPC for programmatic access
-- **Service Catalog** - Track all applications and dependencies
+- **Kubernetes Operator** - CRD-based, level-triggered reconciliation
+- **In-Cluster Provisioning** - Leverage existing operators (CNPG, Redis, RabbitMQ)
+- **kubectl Interface** - No CLI or REST API needed
+- **Pluggable Providers** - InfrastructureProvider interface for future extensibility
 
 ## Learning Objectives
 
-This project is built to deeply learn:
-1. Kubernetes Operator patterns (controller-runtime, CRDs, webhooks)
-2. Terraform programmatic usage (state management, module generation)
-3. AWS service provisioning patterns
-4. Platform engineering best practices
+1. Kubernetes operator internals (informers, work queues, leader election)
+2. CRD design with OpenAPI validation and kubebuilder markers
+3. Admission webhooks (validating, mutating, conversion)
+4. Multi-version CRD evolution (hub-and-spoke pattern)
+5. Prometheus operator ecosystem (ServiceMonitor, PrometheusRule)
+6. Policy engines (Kyverno integration)
+7. E2E testing for operators (Kind, CI/CD)
+8. Drift detection and self-healing reconciliation
 
 ## Success Criteria
 
-1. Developer can deploy a complete application with database, cache, and queue in < 5 minutes
-2. All infrastructure follows security best practices by default
-3. Monitoring and alerting is automatic
-4. Service catalog tracks all applications
-5. Cost allocation is automatic
+1. Operator provisions complete infrastructure from a single Application CR
+2. All patterns follow production best practices (finalizers, conditions, events, owner refs)
+3. Webhooks validate and default Application resources
+4. Multi-version CRD works with conversion webhooks
+5. Controller exposes custom Prometheus metrics
+6. E2E tests validate full lifecycle on real Kind cluster
 
 ## Constraints
 
-- Must work with existing AWS accounts
-- Must integrate with existing Terraform modules
-- Must support GitOps workflows (ArgoCD)
-- Must be self-hosted (no SaaS dependencies)
+- Kubernetes-only (no cloud provider APIs, no Terraform)
+- kubectl-only interface (no CLI tool, no REST API)
+- Must work with Kind for testing
+- Self-hosted (no SaaS dependencies)
+- Timeline: 1-2 months for remaining milestones
