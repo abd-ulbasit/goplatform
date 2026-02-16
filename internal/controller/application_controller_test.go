@@ -531,7 +531,10 @@ var _ = Describe("Application Controller", func() {
 			}
 		})
 
-		It("should mark database condition as pending", func() {
+		It("should set database condition to ready when provider reports ready", func() {
+			// createReconciler() has no ProviderFactory, so getProvider()
+			// creates a default Factory → loads env (defaults to "mock") →
+			// creates MockProvider with delay=0 → Provision returns Ready immediately.
 			reconciler := createReconciler()
 
 			// First reconcile - adds finalizer
@@ -539,12 +542,12 @@ var _ = Describe("Application Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 
-			// Second reconcile - updates status
+			// Second reconcile - provisions infrastructure
 			_, _ = reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 
-			By("Verifying DatabaseReady condition is pending")
+			By("Verifying DatabaseReady condition is set")
 			app := &platformv1alpha1.Application{}
 			Eventually(func() *metav1.Condition {
 				if err := k8sClient.Get(ctx, typeNamespacedName, app); err != nil {
@@ -554,8 +557,8 @@ var _ = Describe("Application Controller", func() {
 			}, timeout, interval).ShouldNot(BeNil())
 
 			databaseCondition := meta.FindStatusCondition(app.Status.Conditions, platformv1alpha1.ConditionTypeDatabaseReady)
-			Expect(databaseCondition.Status).To(Equal(metav1.ConditionFalse))
-			Expect(databaseCondition.Reason).To(Equal("DatabaseProvisioningPending"))
+			Expect(databaseCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(databaseCondition.Reason).To(Equal("DatabaseReady"))
 		})
 	})
 
@@ -772,4 +775,771 @@ var _ = Describe("Application Controller", func() {
 			Expect(result.Requeue).To(BeFalse())
 		})
 	})
+
+	// =========================================================================
+	// TEST: CREDENTIAL INJECTION - UNIT TESTS
+	// =========================================================================
+	//
+	// These tests validate the credential injection functions directly
+	// without requiring envtest. They cover:
+	//   - secretEnvVar: building a single env var from a Secret key
+	//   - buildDatabaseEnvVars: postgres vs mysql env var names
+	//   - buildCacheEnvVars: redis env vars
+	//   - buildQueueEnvVars: rabbitmq env vars
+	//   - appendIfNotDefined: user-defined precedence logic
+	//   - buildEnvVars: full orchestration with opt-out and precedence
+	//
+	// WHY UNIT TEST THESE:
+	//   A broken secretKeyRef or wrong secret name silently results in
+	//   empty env vars at runtime — the pod starts but the app can't
+	//   connect to anything. These tests catch naming mismatches early.
+	//
+	// =========================================================================
+
+	Context("Credential injection unit tests", func() {
+
+		// =====================================================================
+		// secretEnvVar
+		// =====================================================================
+
+		Describe("secretEnvVar", func() {
+			It("should build an EnvVar with a secretKeyRef", func() {
+				envVar := secretEnvVar("DATABASE_URL", "my-app-db-credentials", "connectionString")
+
+				Expect(envVar.Name).To(Equal("DATABASE_URL"))
+				Expect(envVar.Value).To(BeEmpty(), "Value must be empty when using ValueFrom")
+				Expect(envVar.ValueFrom).NotTo(BeNil())
+				Expect(envVar.ValueFrom.SecretKeyRef).NotTo(BeNil())
+				Expect(envVar.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-db-credentials"))
+				Expect(envVar.ValueFrom.SecretKeyRef.Key).To(Equal("connectionString"))
+			})
+		})
+
+		// =====================================================================
+		// buildDatabaseEnvVars
+		// =====================================================================
+
+		Describe("buildDatabaseEnvVars", func() {
+			It("should return PostgreSQL-specific env vars for postgres type", func() {
+				vars := buildDatabaseEnvVars("my-app-db-credentials", platformv1alpha1.DatabasePostgres)
+
+				// Should produce: DATABASE_URL, PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
+				Expect(vars).To(HaveLen(6))
+
+				names := envVarNames(vars)
+				Expect(names).To(ConsistOf(
+					"DATABASE_URL",
+					"PGHOST",
+					"PGPORT",
+					"PGUSER",
+					"PGPASSWORD",
+					"PGDATABASE",
+				))
+
+				// Verify secret references
+				for _, v := range vars {
+					Expect(v.ValueFrom).NotTo(BeNil(), "env var %s should use ValueFrom", v.Name)
+					Expect(v.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-db-credentials"),
+						"env var %s should reference the correct secret", v.Name)
+				}
+
+				// Verify specific key mappings
+				Expect(findEnvVar(vars, "DATABASE_URL").ValueFrom.SecretKeyRef.Key).To(Equal("connectionString"))
+				Expect(findEnvVar(vars, "PGHOST").ValueFrom.SecretKeyRef.Key).To(Equal("host"))
+				Expect(findEnvVar(vars, "PGPORT").ValueFrom.SecretKeyRef.Key).To(Equal("port"))
+				Expect(findEnvVar(vars, "PGUSER").ValueFrom.SecretKeyRef.Key).To(Equal("username"))
+				Expect(findEnvVar(vars, "PGPASSWORD").ValueFrom.SecretKeyRef.Key).To(Equal("password"))
+				Expect(findEnvVar(vars, "PGDATABASE").ValueFrom.SecretKeyRef.Key).To(Equal("database"))
+			})
+
+			It("should return MySQL-specific env vars for mysql type", func() {
+				vars := buildDatabaseEnvVars("my-app-db-credentials", platformv1alpha1.DatabaseMySQL)
+
+				// Should produce: DATABASE_URL, MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+				Expect(vars).To(HaveLen(6))
+
+				names := envVarNames(vars)
+				Expect(names).To(ConsistOf(
+					"DATABASE_URL",
+					"MYSQL_HOST",
+					"MYSQL_PORT",
+					"MYSQL_USER",
+					"MYSQL_PASSWORD",
+					"MYSQL_DATABASE",
+				))
+
+				// Verify specific key mappings for MySQL
+				Expect(findEnvVar(vars, "DATABASE_URL").ValueFrom.SecretKeyRef.Key).To(Equal("connectionString"))
+				Expect(findEnvVar(vars, "MYSQL_HOST").ValueFrom.SecretKeyRef.Key).To(Equal("host"))
+				Expect(findEnvVar(vars, "MYSQL_PORT").ValueFrom.SecretKeyRef.Key).To(Equal("port"))
+				Expect(findEnvVar(vars, "MYSQL_USER").ValueFrom.SecretKeyRef.Key).To(Equal("username"))
+				Expect(findEnvVar(vars, "MYSQL_PASSWORD").ValueFrom.SecretKeyRef.Key).To(Equal("password"))
+				Expect(findEnvVar(vars, "MYSQL_DATABASE").ValueFrom.SecretKeyRef.Key).To(Equal("database"))
+			})
+
+			It("should return only DATABASE_URL for unknown type", func() {
+				// The switch statement has no default case, so only DATABASE_URL
+				// is added for an unrecognized type. This is a safety net.
+				vars := buildDatabaseEnvVars("my-app-db-credentials", "unknown")
+
+				Expect(vars).To(HaveLen(1))
+				Expect(vars[0].Name).To(Equal("DATABASE_URL"))
+			})
+		})
+
+		// =====================================================================
+		// buildCacheEnvVars
+		// =====================================================================
+
+		Describe("buildCacheEnvVars", func() {
+			It("should return Redis env vars", func() {
+				vars := buildCacheEnvVars("my-app-cache-credentials")
+
+				Expect(vars).To(HaveLen(4))
+
+				names := envVarNames(vars)
+				Expect(names).To(ConsistOf(
+					"REDIS_URL",
+					"REDIS_HOST",
+					"REDIS_PORT",
+					"REDIS_PASSWORD",
+				))
+
+				// Verify all reference the correct secret
+				for _, v := range vars {
+					Expect(v.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-cache-credentials"))
+				}
+
+				// Verify key mappings
+				Expect(findEnvVar(vars, "REDIS_URL").ValueFrom.SecretKeyRef.Key).To(Equal("connectionString"))
+				Expect(findEnvVar(vars, "REDIS_HOST").ValueFrom.SecretKeyRef.Key).To(Equal("host"))
+				Expect(findEnvVar(vars, "REDIS_PORT").ValueFrom.SecretKeyRef.Key).To(Equal("port"))
+				Expect(findEnvVar(vars, "REDIS_PASSWORD").ValueFrom.SecretKeyRef.Key).To(Equal("password"))
+			})
+		})
+
+		// =====================================================================
+		// buildQueueEnvVars
+		// =====================================================================
+
+		Describe("buildQueueEnvVars", func() {
+			It("should return RabbitMQ env vars", func() {
+				vars := buildQueueEnvVars("my-app-queue-credentials")
+
+				Expect(vars).To(HaveLen(5))
+
+				names := envVarNames(vars)
+				Expect(names).To(ConsistOf(
+					"AMQP_URL",
+					"RABBITMQ_HOST",
+					"RABBITMQ_PORT",
+					"RABBITMQ_USER",
+					"RABBITMQ_PASSWORD",
+				))
+
+				// Verify all reference the correct secret
+				for _, v := range vars {
+					Expect(v.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-queue-credentials"))
+				}
+
+				// Verify key mappings
+				Expect(findEnvVar(vars, "AMQP_URL").ValueFrom.SecretKeyRef.Key).To(Equal("connectionString"))
+				Expect(findEnvVar(vars, "RABBITMQ_HOST").ValueFrom.SecretKeyRef.Key).To(Equal("host"))
+				Expect(findEnvVar(vars, "RABBITMQ_PORT").ValueFrom.SecretKeyRef.Key).To(Equal("port"))
+				Expect(findEnvVar(vars, "RABBITMQ_USER").ValueFrom.SecretKeyRef.Key).To(Equal("username"))
+				Expect(findEnvVar(vars, "RABBITMQ_PASSWORD").ValueFrom.SecretKeyRef.Key).To(Equal("password"))
+			})
+		})
+
+		// =====================================================================
+		// appendIfNotDefined
+		// =====================================================================
+
+		Describe("appendIfNotDefined", func() {
+			It("should append vars that are not in the user-defined set", func() {
+				existing := []corev1.EnvVar{
+					{Name: "USER_VAR", Value: "user-value"},
+				}
+				userDefined := map[string]struct{}{
+					"USER_VAR": {},
+				}
+				toAppend := []corev1.EnvVar{
+					{Name: "NEW_VAR", Value: "new-value"},
+					{Name: "USER_VAR", Value: "should-be-skipped"},
+				}
+
+				result := appendIfNotDefined(existing, userDefined, toAppend...)
+
+				Expect(result).To(HaveLen(2))
+				Expect(result[0].Name).To(Equal("USER_VAR"))
+				Expect(result[0].Value).To(Equal("user-value"))
+				Expect(result[1].Name).To(Equal("NEW_VAR"))
+				Expect(result[1].Value).To(Equal("new-value"))
+			})
+
+			It("should append all vars when no conflicts exist", func() {
+				existing := []corev1.EnvVar{}
+				userDefined := map[string]struct{}{}
+				toAppend := []corev1.EnvVar{
+					{Name: "A", Value: "1"},
+					{Name: "B", Value: "2"},
+				}
+
+				result := appendIfNotDefined(existing, userDefined, toAppend...)
+				Expect(result).To(HaveLen(2))
+			})
+
+			It("should skip all vars when all conflict", func() {
+				existing := []corev1.EnvVar{
+					{Name: "A", Value: "user"},
+					{Name: "B", Value: "user"},
+				}
+				userDefined := map[string]struct{}{
+					"A": {},
+					"B": {},
+				}
+				toAppend := []corev1.EnvVar{
+					{Name: "A", Value: "injected"},
+					{Name: "B", Value: "injected"},
+				}
+
+				result := appendIfNotDefined(existing, userDefined, toAppend...)
+				Expect(result).To(HaveLen(2))
+				Expect(result[0].Value).To(Equal("user"))
+				Expect(result[1].Value).To(Equal("user"))
+			})
+		})
+
+		// =====================================================================
+		// buildEnvVars — the orchestrator
+		// =====================================================================
+
+		Describe("buildEnvVars", func() {
+			var reconciler *ApplicationReconciler
+
+			BeforeEach(func() {
+				reconciler = createReconciler()
+			})
+
+			It("should inject database env vars when database is in spec", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				names := envVarNames(vars)
+				Expect(names).To(ContainElements(
+					"DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE",
+				))
+
+				// Verify secret name follows convention: {app.Name}-db-credentials
+				dbURL := findEnvVar(vars, "DATABASE_URL")
+				Expect(dbURL.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-db-credentials"))
+			})
+
+			It("should inject cache env vars when cache is in spec", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+						},
+						Cache: &platformv1alpha1.CacheSpec{
+							Type: platformv1alpha1.CacheRedis,
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				names := envVarNames(vars)
+				Expect(names).To(ContainElements(
+					"REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD",
+				))
+
+				redisURL := findEnvVar(vars, "REDIS_URL")
+				Expect(redisURL.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-cache-credentials"))
+			})
+
+			It("should inject queue env vars when queue is in spec", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+						},
+						Queue: &platformv1alpha1.QueueSpec{
+							Type: platformv1alpha1.QueueRabbitMQ,
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				names := envVarNames(vars)
+				Expect(names).To(ContainElements(
+					"AMQP_URL", "RABBITMQ_HOST", "RABBITMQ_PORT", "RABBITMQ_USER", "RABBITMQ_PASSWORD",
+				))
+
+				amqpURL := findEnvVar(vars, "AMQP_URL")
+				Expect(amqpURL.ValueFrom.SecretKeyRef.Name).To(Equal("my-app-queue-credentials"))
+			})
+
+			It("should inject all infrastructure env vars when all are in spec", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "full-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+						Cache: &platformv1alpha1.CacheSpec{
+							Type: platformv1alpha1.CacheRedis,
+						},
+						Queue: &platformv1alpha1.QueueSpec{
+							Type: platformv1alpha1.QueueRabbitMQ,
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				// 6 (postgres) + 4 (redis) + 5 (rabbitmq) = 15
+				Expect(vars).To(HaveLen(15))
+
+				names := envVarNames(vars)
+				Expect(names).To(ContainElements("DATABASE_URL", "PGHOST"))
+				Expect(names).To(ContainElements("REDIS_URL", "REDIS_HOST"))
+				Expect(names).To(ContainElements("AMQP_URL", "RABBITMQ_HOST"))
+			})
+
+			It("should not inject any credentials when InjectCredentials is false", func() {
+				injectFalse := false
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image:             "nginx:latest",
+							InjectCredentials: &injectFalse,
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+						Cache: &platformv1alpha1.CacheSpec{
+							Type: platformv1alpha1.CacheRedis,
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				Expect(vars).To(BeEmpty(), "no env vars should be injected when InjectCredentials=false")
+			})
+
+			It("should preserve user-defined env vars when InjectCredentials is false", func() {
+				injectFalse := false
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image:             "nginx:latest",
+							InjectCredentials: &injectFalse,
+							Env: []corev1.EnvVar{
+								{Name: "MY_VAR", Value: "my-value"},
+							},
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				Expect(vars).To(HaveLen(1))
+				Expect(vars[0].Name).To(Equal("MY_VAR"))
+				Expect(vars[0].Value).To(Equal("my-value"))
+			})
+
+			It("should let user-defined DATABASE_URL take precedence over injected one", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+							Env: []corev1.EnvVar{
+								{Name: "DATABASE_URL", Value: "postgres://external-pooler:5432/db"},
+							},
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+
+				// DATABASE_URL should be the user's value (plain string), not a secretKeyRef
+				dbURL := findEnvVar(vars, "DATABASE_URL")
+				Expect(dbURL.Value).To(Equal("postgres://external-pooler:5432/db"))
+				Expect(dbURL.ValueFrom).To(BeNil(), "user-defined var should not use ValueFrom")
+
+				// Other PG vars should still be injected (user only overrode DATABASE_URL)
+				names := envVarNames(vars)
+				Expect(names).To(ContainElements("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"))
+			})
+
+			It("should not inject anything when no infrastructure is in spec", func() {
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image: "nginx:latest",
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+				Expect(vars).To(BeEmpty())
+			})
+
+			It("should inject by default when InjectCredentials is nil (pointer default)", func() {
+				// InjectCredentials defaults to true. When nil, injection should proceed.
+				app := &platformv1alpha1.Application{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "default"},
+					Spec: platformv1alpha1.ApplicationSpec{
+						Team:  "platform",
+						Owner: "test@example.com",
+						Workload: &platformv1alpha1.WorkloadSpec{
+							Image:             "nginx:latest",
+							InjectCredentials: nil, // not set — should default to inject
+						},
+						Database: &platformv1alpha1.DatabaseSpec{
+							Type:    platformv1alpha1.DatabasePostgres,
+							Version: "16",
+						},
+					},
+				}
+
+				vars := reconciler.buildEnvVars(app)
+				Expect(vars).To(HaveLen(6))
+			})
+		})
+	})
+
+	// =========================================================================
+	// TEST: CREDENTIAL INJECTION - INTEGRATION TESTS
+	// =========================================================================
+	//
+	// These tests verify that credential env vars actually end up in the
+	// Deployment created by the controller. Unlike the unit tests above
+	// (which test functions directly), these tests go through the full
+	// reconciliation loop with envtest.
+	//
+	// =========================================================================
+
+	Context("Credential injection integration tests", func() {
+		const resourceName = "test-cred-inject"
+		var typeNamespacedName types.NamespacedName
+
+		BeforeEach(func() {
+			typeNamespacedName = types.NamespacedName{
+				Name:      resourceName,
+				Namespace: "default",
+			}
+		})
+
+		AfterEach(func() {
+			app := &platformv1alpha1.Application{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, app); err == nil {
+				app.Finalizers = nil
+				_ = k8sClient.Update(ctx, app)
+				_ = k8sClient.Delete(ctx, app)
+			}
+			deploy := &appsv1.Deployment{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, deploy); err == nil {
+				_ = k8sClient.Delete(ctx, deploy)
+			}
+			svc := &corev1.Service{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, svc); err == nil {
+				_ = k8sClient.Delete(ctx, svc)
+			}
+		})
+
+		It("should inject database env vars into the Deployment", func() {
+			By("Creating an Application with a postgres database and workload")
+			replicas := int32(1)
+			app := &platformv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: platformv1alpha1.ApplicationSpec{
+					Team:  "platform",
+					Owner: "test@example.com",
+					Tier:  platformv1alpha1.TierStandard,
+					Workload: &platformv1alpha1.WorkloadSpec{
+						Image:    "nginx:latest",
+						Replicas: &replicas,
+						Ports: []platformv1alpha1.ContainerPort{
+							{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+						},
+					},
+					Database: &platformv1alpha1.DatabaseSpec{
+						Type:    platformv1alpha1.DatabasePostgres,
+						Size:    platformv1alpha1.SizeSmall,
+						Version: "16",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+			By("Reconciling (finalizer + resource creation)")
+			reconciler := createReconciler()
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment has injected env vars")
+			deployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, deployment)
+			}, timeout, interval).Should(Succeed())
+
+			container := deployment.Spec.Template.Spec.Containers[0]
+			names := containerEnvVarNames(container.Env)
+
+			Expect(names).To(ContainElements(
+				"DATABASE_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE",
+			))
+
+			// Verify the secret name follows convention
+			dbURL := findContainerEnvVar(container.Env, "DATABASE_URL")
+			Expect(dbURL).NotTo(BeNil())
+			Expect(dbURL.ValueFrom.SecretKeyRef.Name).To(Equal(resourceName + "-db-credentials"))
+		})
+
+		It("should not inject credentials when InjectCredentials is false", func() {
+			By("Creating an Application with InjectCredentials=false")
+			replicas := int32(1)
+			injectFalse := false
+			app := &platformv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: platformv1alpha1.ApplicationSpec{
+					Team:  "platform",
+					Owner: "test@example.com",
+					Tier:  platformv1alpha1.TierStandard,
+					Workload: &platformv1alpha1.WorkloadSpec{
+						Image:             "nginx:latest",
+						Replicas:          &replicas,
+						InjectCredentials: &injectFalse,
+						Ports: []platformv1alpha1.ContainerPort{
+							{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+						},
+					},
+					Database: &platformv1alpha1.DatabaseSpec{
+						Type:    platformv1alpha1.DatabasePostgres,
+						Size:    platformv1alpha1.SizeSmall,
+						Version: "16",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+			By("Reconciling")
+			reconciler := createReconciler()
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment has no injected env vars")
+			deployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, deployment)
+			}, timeout, interval).Should(Succeed())
+
+			container := deployment.Spec.Template.Spec.Containers[0]
+			Expect(container.Env).To(BeEmpty(), "no env vars should be present when injection is disabled")
+		})
+
+		It("should pass envFrom sources to the Deployment container", func() {
+			By("Creating an Application with envFrom")
+			replicas := int32(1)
+			app := &platformv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: platformv1alpha1.ApplicationSpec{
+					Team:  "platform",
+					Owner: "test@example.com",
+					Tier:  platformv1alpha1.TierStandard,
+					Workload: &platformv1alpha1.WorkloadSpec{
+						Image:    "nginx:latest",
+						Replicas: &replicas,
+						EnvFrom: []corev1.EnvFromSource{
+							{
+								SecretRef: &corev1.SecretEnvSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "external-api-keys",
+									},
+								},
+							},
+						},
+						Ports: []platformv1alpha1.ContainerPort{
+							{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+			By("Reconciling")
+			reconciler := createReconciler()
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment container has envFrom")
+			deployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, deployment)
+			}, timeout, interval).Should(Succeed())
+
+			container := deployment.Spec.Template.Spec.Containers[0]
+			Expect(container.EnvFrom).To(HaveLen(1))
+			Expect(container.EnvFrom[0].SecretRef).NotTo(BeNil())
+			Expect(container.EnvFrom[0].SecretRef.Name).To(Equal("external-api-keys"))
+		})
+
+		It("should let user-defined env vars take precedence in the Deployment", func() {
+			By("Creating an Application with a user-defined DATABASE_URL")
+			replicas := int32(1)
+			app := &platformv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: platformv1alpha1.ApplicationSpec{
+					Team:  "platform",
+					Owner: "test@example.com",
+					Tier:  platformv1alpha1.TierStandard,
+					Workload: &platformv1alpha1.WorkloadSpec{
+						Image:    "nginx:latest",
+						Replicas: &replicas,
+						Env: []corev1.EnvVar{
+							{Name: "DATABASE_URL", Value: "postgres://external:5432/mydb"},
+						},
+						Ports: []platformv1alpha1.ContainerPort{
+							{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+						},
+					},
+					Database: &platformv1alpha1.DatabaseSpec{
+						Type:    platformv1alpha1.DatabasePostgres,
+						Size:    platformv1alpha1.SizeSmall,
+						Version: "16",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+			By("Reconciling")
+			reconciler := createReconciler()
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Deployment uses the user-defined DATABASE_URL")
+			deployment := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, deployment)
+			}, timeout, interval).Should(Succeed())
+
+			container := deployment.Spec.Template.Spec.Containers[0]
+			dbURL := findContainerEnvVar(container.Env, "DATABASE_URL")
+			Expect(dbURL).NotTo(BeNil())
+			Expect(dbURL.Value).To(Equal("postgres://external:5432/mydb"),
+				"user-defined DATABASE_URL should win over auto-injected")
+			Expect(dbURL.ValueFrom).To(BeNil(),
+				"user-defined var should be a plain value, not a secretKeyRef")
+
+			By("Verifying other PG vars are still injected")
+			names := containerEnvVarNames(container.Env)
+			Expect(names).To(ContainElements("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"))
+		})
+	})
 })
+
+// =============================================================================
+// TEST HELPERS
+// =============================================================================
+
+// envVarNames extracts the names from a slice of EnvVars for easy assertion.
+func envVarNames(vars []corev1.EnvVar) []string {
+	names := make([]string, len(vars))
+	for i, v := range vars {
+		names[i] = v.Name
+	}
+	return names
+}
+
+// containerEnvVarNames is an alias for envVarNames — same type, different
+// semantic context (container env vs function return).
+func containerEnvVarNames(vars []corev1.EnvVar) []string {
+	return envVarNames(vars)
+}
+
+// findEnvVar finds an env var by name in a slice. Returns the EnvVar or panics.
+func findEnvVar(vars []corev1.EnvVar, name string) corev1.EnvVar {
+	for _, v := range vars {
+		if v.Name == name {
+			return v
+		}
+	}
+	panic(fmt.Sprintf("env var %q not found in %v", name, envVarNames(vars)))
+}
+
+// findContainerEnvVar finds an env var by name, returning a pointer (nil if not found).
+func findContainerEnvVar(vars []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range vars {
+		if vars[i].Name == name {
+			return &vars[i]
+		}
+	}
+	return nil
+}

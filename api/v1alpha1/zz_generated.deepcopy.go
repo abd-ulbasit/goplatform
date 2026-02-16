@@ -615,6 +615,18 @@ func (in *WorkloadSpec) DeepCopyInto(out *WorkloadSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.EnvFrom != nil {
+		in, out := &in.EnvFrom, &out.EnvFrom
+		*out = make([]v1.EnvFromSource, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.InjectCredentials != nil {
+		in, out := &in.InjectCredentials, &out.InjectCredentials
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Command != nil {
 		in, out := &in.Command, &out.Command
 		*out = make([]string, len(*in))

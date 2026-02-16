@@ -372,9 +372,61 @@ type WorkloadSpec struct {
 	HealthCheck *HealthCheckSpec `json:"healthCheck,omitempty"`
 
 	// Env defines environment variables for the container.
-	// Database connection strings are automatically injected.
+	// If InjectCredentials is true (default), infrastructure credentials are
+	// appended automatically. User-defined vars take precedence over injected ones.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// EnvFrom allows bulk-injecting environment variables from Secrets or ConfigMaps.
+	// Use this for external credentials (Stripe keys, Google API keys, etc.)
+	// that are managed outside the platform.
+	//
+	// The referenced Secrets/ConfigMaps must already exist in the same namespace.
+	// They can be created manually, via CI/CD, Sealed Secrets, or
+	// External Secrets Operator.
+	//
+	// HOW IT WORKS:
+	//   Every key in the referenced Secret becomes an env var in the container.
+	//   For example, a Secret with data {"STRIPE_KEY": "sk_live_..."} injects
+	//   STRIPE_KEY=sk_live_... into the pod.
+	//
+	// COMPARISON WITH Env:
+	//   ┌──────────────────────────────────────────────────────────────────────┐
+	//   │ Field     │ Use Case                    │ Granularity               │
+	//   ├───────────┼─────────────────────────────┼───────────────────────────┤
+	//   │ env       │ Individual vars or overrides │ One var at a time         │
+	//   │ envFrom   │ Bulk-mount external Secrets  │ Entire Secret/ConfigMap   │
+	//   └───────────┴─────────────────────────────┴───────────────────────────┘
+	// +optional
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// InjectCredentials controls whether the platform automatically injects
+	// environment variables for provisioned infrastructure (database, cache, queue).
+	//
+	// When true (the default), well-known env vars are injected into the container
+	// from the auto-created credential Secrets:
+	//   - Database (postgres): DATABASE_URL, PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
+	//   - Database (mysql):    DATABASE_URL, MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+	//   - Cache (redis):       REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+	//   - Queue (rabbitmq):    AMQP_URL, RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD
+	//
+	// Set to false only if you need full control over how credentials reach your app
+	// (e.g., a sidecar reads credentials from a file instead of env vars).
+	//
+	// WHY AUTO-INJECT:
+	//   ┌──────────────────────────────────────────────────────────────────────┐
+	//   │ Platform        │ Credential Strategy                               │
+	//   ├─────────────────┼───────────────────────────────────────────────────┤
+	//   │ Heroku          │ Auto-inject DATABASE_URL into every dyno          │
+	//   │ Railway         │ Auto-inject ${{Postgres.DATABASE_URL}}            │
+	//   │ Render          │ Auto-inject connection strings for linked DBs     │
+	//   │ GoPlatform      │ Auto-inject well-known env vars (this feature)    │
+	//   │ Crossplane      │ Manual: user wires Secrets via compositionRef     │
+	//   └─────────────────┴───────────────────────────────────────────────────┘
+	//
+	// +kubebuilder:default=true
+	// +optional
+	InjectCredentials *bool `json:"injectCredentials,omitempty"`
 
 	// Command overrides the container entrypoint.
 	// +optional

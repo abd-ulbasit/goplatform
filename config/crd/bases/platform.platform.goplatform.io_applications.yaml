@@ -352,7 +352,8 @@ spec:
                   env:
                     description: |-
                       Env defines environment variables for the container.
-                      Database connection strings are automatically injected.
+                      If InjectCredentials is true (default), infrastructure credentials are
+                      appended automatically. User-defined vars take precedence over injected ones.
                     items:
                       description: EnvVar represents an environment variable present
                         in a Container.
@@ -509,6 +510,73 @@ spec:
                       - name
                       type: object
                     type: array
+                  envFrom:
+                    description: |-
+                      EnvFrom allows bulk-injecting environment variables from Secrets or ConfigMaps.
+                      Use this for external credentials (Stripe keys, Google API keys, etc.)
+                      that are managed outside the platform.
+
+                      The referenced Secrets/ConfigMaps must already exist in the same namespace.
+                      They can be created manually, via CI/CD, Sealed Secrets, or
+                      External Secrets Operator.
+
+                      HOW IT WORKS:
+                        Every key in the referenced Secret becomes an env var in the container.
+                        For example, a Secret with data {"STRIPE_KEY": "sk_live_..."} injects
+                        STRIPE_KEY=sk_live_... into the pod.
+
+                      COMPARISON WITH Env:
+                        ┌──────────────────────────────────────────────────────────────────────┐
+                        │ Field     │ Use Case                    │ Granularity               │
+                        ├───────────┼─────────────────────────────┼───────────────────────────┤
+                        │ env       │ Individual vars or overrides │ One var at a time         │
+                        │ envFrom   │ Bulk-mount external Secrets  │ Entire Secret/ConfigMap   │
+                        └───────────┴─────────────────────────────┴───────────────────────────┘
+                    items:
+                      description: EnvFromSource represents the source of a set of
+                        ConfigMaps or Secrets
+                      properties:
+                        configMapRef:
+                          description: The ConfigMap to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        prefix:
+                          description: |-
+                            Optional text to prepend to the name of each environment variable.
+                            May consist of any printable ASCII characters except '='.
+                          type: string
+                        secretRef:
+                          description: The Secret to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                    type: array
                   healthCheck:
                     description: HealthCheck configures liveness and readiness probes.
                     properties:
@@ -549,6 +617,33 @@ spec:
                       Examples: ghcr.io/company/app:v1.0.0, nginx:latest
                     minLength: 1
                     type: string
+                  injectCredentials:
+                    default: true
+                    description: |-
+                      InjectCredentials controls whether the platform automatically injects
+                      environment variables for provisioned infrastructure (database, cache, queue).
+
+                      When true (the default), well-known env vars are injected into the container
+                      from the auto-created credential Secrets:
+                        - Database (postgres): DATABASE_URL, PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
+                        - Database (mysql):    DATABASE_URL, MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+                        - Cache (redis):       REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+                        - Queue (rabbitmq):    AMQP_URL, RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD
+
+                      Set to false only if you need full control over how credentials reach your app
+                      (e.g., a sidecar reads credentials from a file instead of env vars).
+
+                      WHY AUTO-INJECT:
+                        ┌──────────────────────────────────────────────────────────────────────┐
+                        │ Platform        │ Credential Strategy                               │
+                        ├─────────────────┼───────────────────────────────────────────────────┤
+                        │ Heroku          │ Auto-inject DATABASE_URL into every dyno          │
+                        │ Railway         │ Auto-inject ${{Postgres.DATABASE_URL}}            │
+                        │ Render          │ Auto-inject connection strings for linked DBs     │
+                        │ GoPlatform      │ Auto-inject well-known env vars (this feature)    │
+                        │ Crossplane      │ Manual: user wires Secrets via compositionRef     │
+                        └─────────────────┴───────────────────────────────────────────────────┘
+                    type: boolean
                   ports:
                     description: Ports defines the ports the container exposes.
                     items:

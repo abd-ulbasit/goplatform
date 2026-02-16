@@ -310,6 +310,15 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
+// RBAC for third-party operator CRDs managed by KubernetesProvider
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=databases.spotahome.com,resources=redisfailovers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch;create;update;patch;delete
+
+// RBAC for PVCs and Pods managed/observed by KubernetesProvider
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list
+
 // =============================================================================
 // RECONCILE - THE MAIN LOOP
 // =============================================================================
@@ -618,7 +627,7 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return err
 		}
 
-		originalStatus := app.Status
+		originalStatus := *app.Status.DeepCopy()
 
 		// Update infrastructure status from provider state
 		r.applyInfrastructureStatus(&app, infraState)
@@ -978,7 +987,25 @@ func (r *ApplicationReconciler) buildDeployment(app *platformv1alpha1.Applicatio
 	}
 
 	// Build environment variables
-	env := app.Spec.Workload.Env
+	// =========================================================================
+	// CREDENTIAL INJECTION:
+	//   The platform auto-injects well-known env vars for provisioned infra.
+	//   This is the Heroku/Railway pattern: declare a database in your spec,
+	//   and DATABASE_URL + PG* vars appear in your container automatically.
+	//
+	//   Flow:
+	//     1. Start with user-defined env vars (always take precedence)
+	//     2. Collect user-defined names into a set for conflict detection
+	//     3. If injectCredentials != false, append infra credential vars
+	//        (skipping any that conflict with user-defined names)
+	//     4. Pass envFrom directly for bulk Secret/ConfigMap mounts
+	//
+	//   WHY USER VARS WIN:
+	//     If a user explicitly sets DATABASE_URL in their env list, they
+	//     probably have a reason (external DB, connection pooler, etc.).
+	//     Silently overwriting it would cause hard-to-debug failures.
+	// =========================================================================
+	env := r.buildEnvVars(app)
 
 	// Build resource requirements (with nil-safe handling)
 	// =========================================================================
@@ -1003,6 +1030,7 @@ func (r *ApplicationReconciler) buildDeployment(app *platformv1alpha1.Applicatio
 		Ports:          containerPorts,
 		Resources:      resources,
 		Env:            env,
+		EnvFrom:        app.Spec.Workload.EnvFrom,
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
 	}
@@ -1038,6 +1066,153 @@ func (r *ApplicationReconciler) buildDeployment(app *platformv1alpha1.Applicatio
 			},
 		},
 	}
+}
+
+// =============================================================================
+// CREDENTIAL INJECTION
+// =============================================================================
+//
+// buildEnvVars constructs the final env var list for the workload container.
+// It merges user-defined env vars with auto-injected infrastructure credentials.
+//
+// INJECTION RULES:
+//   1. User-defined env vars (from spec.workload.env) always take precedence
+//   2. If injectCredentials is true (default), append credential env vars
+//      for each provisioned infrastructure type (database, cache, queue)
+//   3. Skip any auto-injected var whose name conflicts with a user-defined var
+//
+// The injected vars use secretKeyRef to reference the credential Secrets
+// created by the InfrastructureProvider. This means:
+//   - No credential values are stored in the Application spec
+//   - Credential rotation (Secret update) takes effect on next pod restart
+//   - The controller never needs to read actual credential values
+//
+// =============================================================================
+
+func (r *ApplicationReconciler) buildEnvVars(app *platformv1alpha1.Application) []corev1.EnvVar {
+	// Start with user-defined env vars — these always take precedence.
+	env := make([]corev1.EnvVar, len(app.Spec.Workload.Env))
+	copy(env, app.Spec.Workload.Env)
+
+	// Check if injection is disabled. Default is true (inject).
+	if app.Spec.Workload.InjectCredentials != nil && !*app.Spec.Workload.InjectCredentials {
+		return env
+	}
+
+	// Build a set of user-defined env var names for conflict detection.
+	userDefined := make(map[string]struct{}, len(env))
+	for _, e := range env {
+		userDefined[e.Name] = struct{}{}
+	}
+
+	// Inject database credentials if database is in the spec.
+	if app.Spec.Database != nil {
+		secretName := fmt.Sprintf("%s-db-credentials", app.Name)
+		env = appendIfNotDefined(env, userDefined, buildDatabaseEnvVars(secretName, app.Spec.Database.Type)...)
+	}
+
+	// Inject cache credentials if cache is in the spec.
+	if app.Spec.Cache != nil {
+		secretName := fmt.Sprintf("%s-cache-credentials", app.Name)
+		env = appendIfNotDefined(env, userDefined, buildCacheEnvVars(secretName)...)
+	}
+
+	// Inject queue credentials if queue is in the spec.
+	if app.Spec.Queue != nil {
+		secretName := fmt.Sprintf("%s-queue-credentials", app.Name)
+		env = appendIfNotDefined(env, userDefined, buildQueueEnvVars(secretName)...)
+	}
+
+	return env
+}
+
+// buildDatabaseEnvVars returns the env vars for a database credential Secret.
+//
+// For PostgreSQL, the var names follow libpq conventions (PGHOST, PGPORT, etc.)
+// which are natively understood by every PostgreSQL client library — psql, libpq,
+// psycopg2, node-postgres, JDBC, etc. No application code changes needed.
+//
+// DATABASE_URL follows the 12-factor app convention used by Rails, Django,
+// SQLAlchemy, Prisma, Sequelize, and most modern ORMs.
+func buildDatabaseEnvVars(secretName string, dbType platformv1alpha1.DatabaseType) []corev1.EnvVar {
+	// Connection URL — universal across all database types.
+	vars := []corev1.EnvVar{
+		secretEnvVar("DATABASE_URL", secretName, "connectionString"),
+	}
+
+	// Type-specific well-known env var names.
+	switch dbType {
+	case platformv1alpha1.DatabasePostgres:
+		vars = append(vars,
+			secretEnvVar("PGHOST", secretName, "host"),
+			secretEnvVar("PGPORT", secretName, "port"),
+			secretEnvVar("PGUSER", secretName, "username"),
+			secretEnvVar("PGPASSWORD", secretName, "password"),
+			secretEnvVar("PGDATABASE", secretName, "database"),
+		)
+	case platformv1alpha1.DatabaseMySQL:
+		vars = append(vars,
+			secretEnvVar("MYSQL_HOST", secretName, "host"),
+			secretEnvVar("MYSQL_PORT", secretName, "port"),
+			secretEnvVar("MYSQL_USER", secretName, "username"),
+			secretEnvVar("MYSQL_PASSWORD", secretName, "password"),
+			secretEnvVar("MYSQL_DATABASE", secretName, "database"),
+		)
+	}
+
+	return vars
+}
+
+// buildCacheEnvVars returns the env vars for a cache credential Secret.
+// REDIS_URL follows the convention used by Sidekiq, Bull, ioredis, and redis-py.
+func buildCacheEnvVars(secretName string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		secretEnvVar("REDIS_URL", secretName, "connectionString"),
+		secretEnvVar("REDIS_HOST", secretName, "host"),
+		secretEnvVar("REDIS_PORT", secretName, "port"),
+		secretEnvVar("REDIS_PASSWORD", secretName, "password"),
+	}
+}
+
+// buildQueueEnvVars returns the env vars for a queue credential Secret.
+// AMQP_URL follows the convention used by Celery, Bunny, amqplib, and pika.
+func buildQueueEnvVars(secretName string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		secretEnvVar("AMQP_URL", secretName, "connectionString"),
+		secretEnvVar("RABBITMQ_HOST", secretName, "host"),
+		secretEnvVar("RABBITMQ_PORT", secretName, "port"),
+		secretEnvVar("RABBITMQ_USER", secretName, "username"),
+		secretEnvVar("RABBITMQ_PASSWORD", secretName, "password"),
+	}
+}
+
+// secretEnvVar builds a corev1.EnvVar that reads from a Secret key.
+// This is the Kubernetes-native way to inject credentials without exposing
+// them in the pod spec — the kubelet reads the Secret at pod startup.
+func secretEnvVar(envName, secretName, secretKey string) corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: envName,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: secretName,
+				},
+				Key: secretKey,
+			},
+		},
+	}
+}
+
+// appendIfNotDefined appends env vars to the list, skipping any whose name
+// already exists in the userDefined set. This ensures user-specified env vars
+// always take precedence over auto-injected credentials.
+func appendIfNotDefined(env []corev1.EnvVar, userDefined map[string]struct{}, vars ...corev1.EnvVar) []corev1.EnvVar {
+	for _, v := range vars {
+		if _, exists := userDefined[v.Name]; !exists {
+			env = append(env, v)
+		}
+	}
+	return env
 }
 
 // isDeploymentReady checks if deployment has reached desired state.
@@ -1898,7 +2073,7 @@ func (r *ApplicationReconciler) setFailedCondition(ctx context.Context, app *pla
 			return err
 		}
 
-		originalStatus := latest.Status
+		originalStatus := *latest.Status.DeepCopy()
 
 		latest.Status.Phase = platformv1alpha1.ApplicationFailed
 		latest.Status.ObservedGeneration = latest.Generation
@@ -1940,7 +2115,7 @@ func (r *ApplicationReconciler) updatePhase(ctx context.Context, app *platformv1
 			return nil
 		}
 
-		originalStatus := latest.Status
+		originalStatus := *latest.Status.DeepCopy()
 		latest.Status.Phase = phase
 		latest.Status.ObservedGeneration = latest.Generation
 
@@ -1980,37 +2155,6 @@ func (r *ApplicationReconciler) applyCondition(ctx context.Context, app *platfor
 
 	// Use the condition reason as the event reason for consistency.
 	r.Recorder.Event(app, eventType, condition.Reason, fmt.Sprintf("%s: %s", condition.Type, condition.Message))
-}
-
-// setInfrastructureCondition sets a standard condition for infra components.
-// Returns true if the component is considered ready.
-func (r *ApplicationReconciler) setInfrastructureCondition(
-	ctx context.Context,
-	app *platformv1alpha1.Application,
-	conditionType string,
-	requested bool,
-	componentName string,
-) bool {
-	status := metav1.ConditionFalse
-	reason := fmt.Sprintf("%sProvisioningPending", componentName)
-	message := fmt.Sprintf("%s provisioning is pending", componentName)
-
-	if !requested {
-		status = metav1.ConditionTrue
-		reason = fmt.Sprintf("%sNotRequested", componentName)
-		message = fmt.Sprintf("%s not requested", componentName)
-	}
-
-	condition := platformv1alpha1.NewCondition(
-		conditionType,
-		status,
-		reason,
-		message,
-		app.Generation,
-	)
-
-	r.applyCondition(ctx, app, condition)
-	return status == metav1.ConditionTrue
 }
 
 // ensureInfrastructureStatus initializes Infrastructure status when needed.

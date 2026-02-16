@@ -442,17 +442,31 @@ func (p *KubernetesProvider) Destroy(ctx context.Context, app *platformv1alpha1.
 	// Delete in reverse dependency order (queue/cache/db/storage) to avoid
 	// lingering connections. This is conservative and mirrors Terraform best
 	// practices (tear down dependents first).
-	if err := p.cleanupQueue(ctx, app); err != nil {
-		return err
+	//
+	// IMPORTANT: Only clean up resource types that were actually requested in
+	// the spec. Attempting to delete CRs for operators that aren't installed
+	// (e.g., RabbitmqCluster when only CNPG is deployed) would fail and block
+	// the finalizer from being removed, leaving the Application stuck in
+	// Deleting phase.
+	if app.Spec.Queue != nil {
+		if err := p.cleanupQueue(ctx, app); err != nil {
+			return err
+		}
 	}
-	if err := p.cleanupCache(ctx, app); err != nil {
-		return err
+	if app.Spec.Cache != nil {
+		if err := p.cleanupCache(ctx, app); err != nil {
+			return err
+		}
 	}
-	if err := p.cleanupDatabase(ctx, app); err != nil {
-		return err
+	if app.Spec.Database != nil {
+		if err := p.cleanupDatabase(ctx, app); err != nil {
+			return err
+		}
 	}
-	if err := p.cleanupStorage(ctx, app); err != nil {
-		return err
+	if app.Spec.Storage != nil {
+		if err := p.cleanupStorage(ctx, app); err != nil {
+			return err
+		}
 	}
 
 	return nil

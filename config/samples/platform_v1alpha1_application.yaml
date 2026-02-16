@@ -10,20 +10,29 @@ spec:
   owner: platform@example.com
   tier: development
 
+  workload:
+    image: postgres:16-alpine
+    replicas: 1
+    # DATABASE_URL, PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
+    # are auto-injected from the database credential Secret.
+    # No manual secretKeyRef wiring needed!
+    command: ["sh", "-c"]
+    args:
+      - |
+        echo "Waiting for database to become ready..."
+        until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER"; do
+          echo "  Database not ready yet, retrying in 5s..."
+          sleep 5
+        done
+        echo "Database is reachable! Running connectivity test..."
+        psql "postgresql://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$PGDATABASE?sslmode=disable" \
+          -c "SELECT 1 AS connected, current_database(), current_user, version();"
+        echo "SUCCESS: Full database connectivity verified."
+        echo "Staying alive for inspection..."
+        sleep infinity
+
   database:
     type: postgres
     size: small
-    version: "15"
+    version: "16"
     highAvailability: false
-
-  cache:
-    type: redis
-    size: small
-    highAvailability: false
-
-  queue:
-    type: rabbitmq
-    fifo: false
-
-  storage:
-    type: s3

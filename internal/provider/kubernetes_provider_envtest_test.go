@@ -66,6 +66,9 @@ func TestKubernetesProvider_Envtest_CRDProvisioning(t *testing.T) {
 
 	testEnv := &envtest.Environment{
 		CRDs: crds,
+		// Install the Application CRD so we can create Application objects
+		// in the API server (needed for UID assignment → ownerReferences).
+		CRDDirectoryPaths: []string{filepath.Join("..", "..", "config", "crd", "bases")},
 	}
 
 	if getFirstFoundEnvTestBinaryDir() != "" {
@@ -100,6 +103,18 @@ func TestKubernetesProvider_Envtest_CRDProvisioning(t *testing.T) {
 	}
 
 	app := createInfraApplication("envtest")
+
+	// Create the Application in the API server so it gets a UID.
+	// SetControllerReference (used by Provision) requires the owner to have a
+	// non-empty UID, which is only assigned when an object is persisted.
+	if err := cl.Create(ctx, app); err != nil {
+		t.Fatalf("failed to create Application in envtest: %v", err)
+	}
+	// Re-fetch to get the server-assigned UID.
+	if err := cl.Get(ctx, client.ObjectKey{Name: app.Name, Namespace: app.Namespace}, app); err != nil {
+		t.Fatalf("failed to re-fetch Application: %v", err)
+	}
+
 	state, err := provider.Provision(ctx, app)
 	if err != nil && !IsNotReady(err) {
 		t.Fatalf("Provision error: %v", err)

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -17,10 +17,10 @@ RUN go mod download
 COPY . .
 
 # Build the operator binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags='-w -s -extldflags "-static"' \
-    -o /goplatform \
-    ./cmd/goplatform
+    -o /manager \
+    ./cmd/
 
 # Runtime stage
 FROM alpine:3.19
@@ -34,14 +34,15 @@ RUN apk add --no-cache ca-certificates tzdata
 #     unzip /tmp/terraform.zip -d /usr/local/bin/ && \
 #     rm /tmp/terraform.zip
 
-# Create non-root user
-RUN adduser -D -g '' goplatform
+# Create non-root user with explicit numeric UID/GID.
+# Kubernetes runAsNonRoot requires a numeric user to verify non-root status.
+RUN adduser -D -u 65532 -g '' goplatform
 
 # Copy binary from builder
-COPY --from=builder /goplatform /usr/local/bin/goplatform
+COPY --from=builder /manager /manager
 
-# Use non-root user
-USER goplatform
+# Use numeric UID so Kubernetes can verify runAsNonRoot
+USER 65532
 
-# Set entrypoint
-ENTRYPOINT ["/usr/local/bin/goplatform"]
+# The deployment manifest sets the command to /manager
+ENTRYPOINT ["/manager"]
