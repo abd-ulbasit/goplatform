@@ -3,8 +3,8 @@
 ## Status: Phase 2 - Real-World Operator
 
 **Target Milestones**: 12
-**Completed**: 6
-**Current**: Ready for Milestone 7
+**Completed**: 7
+**Current**: Ready for Milestone 8
 
 ---
 
@@ -319,69 +319,90 @@ status:
 
 ---
 
-### Milestone 7: Admission Webhooks - NOT STARTED
+### Credential Injection - ✅ COMPLETED (between M6 and M7)
+
+**Goal:** Auto-inject infrastructure credentials as environment variables into workload containers.
+
+**What You Learned:**
+- The 12-factor app pattern for credential injection (DATABASE_URL, PGHOST, etc.)
+- How `secretKeyRef` keeps credentials out of pod specs (only references, never values)
+- User-defined env vars take precedence over auto-injected ones (appendIfNotDefined pattern)
+- How Heroku, Railway, and Render handle credential injection vs Crossplane's manual approach
+
+**Deliverables:**
+- [x] `InjectCredentials *bool` field on WorkloadSpec (default: true, opt-out)
+- [x] Type-specific env var injection: PostgreSQL (PGHOST, DATABASE_URL), MySQL, Redis, RabbitMQ
+- [x] User-defined env var precedence (skip injection if user already defined the var)
+- [x] `EnvFrom` field for bulk-mounting external Secrets/ConfigMaps
+
+---
+
+### Milestone 7: Admission Webhooks - ✅ COMPLETED
 
 **Goal:** Add validating and mutating admission webhooks to intercept Application CRDs before they hit etcd.
 
 **Why This Milestone Matters:**
 Webhooks are how Kubernetes enforces rules at the API level — before objects are stored. Every production operator uses them. Validating webhooks reject invalid resources (preventing bad state from ever existing), and mutating webhooks inject defaults or modify resources transparently. This is fundamental to understanding how K8s extensibility works.
 
-**What You'll Learn:**
-- How the K8s API server calls webhooks during admission (the admission chain)
-- cert-manager integration for webhook TLS certificates
-- The difference between CRD validation markers and webhook validation (when to use which)
-- Mutating webhooks: injecting defaults, adding labels, setting annotations
-- Webhook failure policies: `Fail` vs `Ignore` and their implications
-- Testing webhooks with envtest (which supports webhooks natively)
+**What You Learned:**
+- How the K8s API server calls webhooks during admission (the admission chain: authn → authz → schema → mutate → re-validate → validate → persist)
+- The kubebuilder v4 `CustomValidator` + `CustomDefaulter` pattern (separate structs from API types)
+- Why conditional defaults need webhooks (kubebuilder markers can only set static values)
+- `field.ErrorList` for returning ALL validation errors at once (not first-error-wins)
+- `apierrors.NewInvalid()` for structured Kubernetes API error formatting
+- Immutable field protection pattern (used by CNPG, AWS ACK, Crossplane)
+- cert-manager integration for webhook TLS (self-signed Issuer → Certificate → Secret)
+- Envtest webhook support: `WebhookInstallOptions`, manager-based webhook server, TLS dial wait loop
+- The `ENABLE_WEBHOOKS` env var pattern for disabling webhooks in development (kubebuilder convention)
+- Kustomize replacements for cert-manager CA injection into webhook configurations
 
-**How to Build It:**
-
-1. **Scaffold with kubebuilder**
-   ```bash
-   kubebuilder create webhook --group platform --version v1alpha1 --kind Application \
-     --defaulting --programmatic-validation
-   ```
-   This generates the webhook files and wires them into the manager.
-
-2. **Validating Webhook** (`application_webhook.go` → `ValidateCreate`, `ValidateUpdate`, `ValidateDelete`)
-   - Cross-field validation that CRD markers can't express:
-     - If `tier: critical` → `highAvailability` must be true for database and cache
-     - If `database.type: postgres` → `database.version` must be a valid PostgreSQL major version (13-17)
-     - `queue.type` must match a supported type for the active provider
-     - Resource names must be valid DNS subdomain names
-   - Update validation:
-     - Prevent changing `database.type` after creation (e.g., postgres → mysql is destructive)
-     - Prevent changing `tier` from `critical` to `development` without explicit annotation override
-   - Delete validation:
-     - Warn (via status, not block) if application has dependents
-
-3. **Mutating Webhook** (`application_webhook.go` → `Default()`)
-   - Set `tier: standard` if not specified
-   - Set `database.version: "16"` if database specified without version
-   - Add `app.kubernetes.io/managed-by: goplatform` label
-   - Add `platform.goplatform.io/team: <team>` label from spec
-   - Set default resource sizes if workload resources not specified
-
-4. **Certificate Management**
-   - Use cert-manager for webhook TLS (standard approach)
-   - Alternative: self-signed certs via controller-runtime's built-in cert rotation
-   - Document both approaches with tradeoffs
-
-5. **Testing**
-   - envtest supports webhooks — tests run with real admission
-   - Test: invalid Application rejected with clear error message
-   - Test: Application without defaults gets them injected
-   - Test: immutable field change rejected on update
-   - Test: webhook failure policy behavior
+**Concepts:**
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ADMISSION WEBHOOK FLOW                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  kubectl apply ──► API Server ──► Schema Validation (CRD markers)          │
+│                                          │                                  │
+│                                          ▼                                  │
+│                                   Mutating Webhooks                        │
+│                                   (inject defaults)                        │
+│                                          │                                  │
+│                                          ▼                                  │
+│                                   Re-validate Schema                       │
+│                                   (catch bad mutations)                    │
+│                                          │                                  │
+│                                          ▼                                  │
+│                                   Validating Webhooks                      │
+│                                   (cross-field rules)                      │
+│                                          │                                  │
+│                                          ▼                                  │
+│                                     Persist to etcd                        │
+│                                                                             │
+│  WHAT WE VALIDATE (webhooks):              WHAT MARKERS VALIDATE:          │
+│  - critical tier → HA required             - field enums (tier values)     │
+│  - postgres version 13-17                  - field patterns (team regex)   │
+│  - mysql version 5 or 8                    - field ranges (maxReplicas≥1)  │
+│  - minReplicas ≤ maxReplicas               - required fields              │
+│  - immutable: database.type on update      - default values               │
+│  - immutable: queue.type on update                                         │
+│  - immutable: cache.type on update                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 **Deliverables:**
-- [ ] Validating webhook with cross-field validation rules
-- [ ] Mutating webhook with default injection
-- [ ] Immutable field protection on updates (database.type, queue.type)
-- [ ] cert-manager configuration for webhook TLS
-- [ ] Envtest tests for validation acceptance and rejection
-- [ ] Envtest tests for mutation (verify defaults applied)
-- [ ] Documentation: webhook architecture and how admission works
+- [x] Validating webhook with cross-field validation rules (critical HA, version ranges, scaling)
+- [x] Mutating webhook with smart defaults (labels, conditional database version, backup for critical)
+- [x] Immutable field protection on updates (database.type, queue.type, cache.type)
+- [x] cert-manager configuration for webhook TLS (Issuer, Certificate, CA injection)
+- [x] 35 unit tests for webhook validation and defaulting logic (98.5% coverage)
+- [x] Envtest webhook integration suite (manager-based webhook server with TLS)
+- [x] Kustomize config: webhook + cert-manager sections enabled
+- [x] `ENABLE_WEBHOOKS` env var guard in `cmd/main.go`
+- [x] Rich inline documentation: admission flow diagrams, comparison tables, pattern explanations
+
+**Test Coverage:** Controller 77.1%, Provider 61.8%, **Webhook 98.5%** — all tests passing
 
 ---
 
@@ -795,6 +816,13 @@ This is the capstone milestone. Everything you've built needs to work together i
 | Status DeepCopy Pattern | Shallow copy of Conditions shares backing array; use DeepCopy | M6 |
 | Kind Cluster Dev Setup | Local Kubernetes with real operators for integration testing | M6 |
 | Controller↔Provider Integration Testing | MockProvider with envtest for verifying wiring | M6 |
+| Credential Injection | Auto-inject env vars from provider Secrets; user precedence | M6.5 |
+| Admission Webhooks | API-level validation before objects reach etcd | M7 |
+| CustomValidator/CustomDefaulter | Kubebuilder v4 webhook pattern separating logic from types | M7 |
+| field.ErrorList | Accumulate and return all validation errors at once | M7 |
+| Immutable Field Protection | Block destructive changes (database.type) on update | M7 |
+| cert-manager Integration | Auto-provision TLS certificates for webhook server | M7 |
+| Conditional Defaulting | Webhook-based defaults that markers can't express | M7 |
 
 ---
 
@@ -809,3 +837,4 @@ This is the capstone milestone. Everything you've built needs to work together i
 | Envtest UID bug (ownerReferences.uid empty) | Medium | ✅ Fixed | Application needs API server creation for UID |
 | Destroy cleanup of non-requested resources | High | ✅ Fixed | Guard each cleanup with spec nil-check |
 | Dockerfile Go version and binary path | Medium | ✅ Fixed | Bumped to 1.25, fixed /manager path, numeric USER |
+| golangci-lint v2 config migration | Low | ✅ Fixed | Added `version: "2"`, moved gofmt/goimports to formatters, removed deprecated gosimple/exportloopref |

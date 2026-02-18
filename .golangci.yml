@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
@@ -5,37 +7,37 @@ run:
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
     - misspell
     - unconvert
     - bodyclose
     - noctx
     - prealloc
-    - exportloopref
     - whitespace
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/abd-ulbasit/goplatform
-  
-  misspell:
-    locale: US
+  settings:
+    misspell:
+      locale: US
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/abd-ulbasit/goplatform
 
 issues:
   exclude-rules:
-    # Exclude some linters from running on tests files.
     - path: _test\.go
       linters:
         - errcheck
         - dupl
-    
-    # Exclude generated files
+
     - path: zz_generated
       linters:
         - all
